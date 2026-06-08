@@ -1,0 +1,91 @@
+[project]
+name = "quant-equity-research"
+version = "0.1.0"
+requires-python = ">=3.11,<3.13"  # drop the upper bound if you remove pandas-ta-openbb
+
+dependencies = [
+    # Core numerics
+    "numpy>=2.4,<3",
+    "pandas>=2.2,<4",          # 2.2 floor for stability; 3.0 works too
+    "scipy>=1.15,<2",
+    "statsmodels>=0.14.6",     # Newey-West, Fama-MacBeth
+
+    # Storage / IO
+    "pyarrow>=18,<25",         # parquet backend
+    "duckdb>=1.4,<2",          # SQL over parquet
+    "polars>=1.20",             # optional fast dataframe
+
+    # ML
+    "scikit-learn>=1.5,<2",
+    "lightgbm>=4.5",           # stretch: gradient-boosted signal combo
+
+    # Finance data
+    "yfinance>=1.3.0",
+    "pandas-datareader>=0.10.0",
+    "fredapi>=0.5.2",           # FRED risk-free / macro
+    "sec-edgar-downloader>=5.0", # 10-K filings for text-sim networks
+
+    # Graphs (your differentiator)
+    "networkx>=3.4",
+    "python-igraph>=0.11",     # much faster than networkx on large graphs
+    "python-louvain>=0.16",    # community detection
+
+    # Portfolio / optimization
+    "cvxpy>=1.6",
+    "riskfolio-lib>=6.0",
+    "PyPortfolioOpt>=1.5.6",
+
+    # Backtest / factor analytics
+    "vectorbt>=0.27",
+    "alphalens-reloaded>=0.4.5",
+
+    # Embeddings (for text-similarity networks)
+    "sentence-transformers>=3.0",
+    "faiss-cpu>=1.9",
+
+    # HTTP / scraping
+    "requests>=2.34",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.3",
+]
+
+[project.optional-dependencies]
+viz = [
+    "matplotlib>=3.10",
+    "seaborn>=0.13",
+    "plotly>=5.24",
+]
+
+dev = [
+    "pytest>=9.0",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+    "black>=25.1",
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+    "ipykernel>=6.29",
+    "jupyterlab>=4.3",
+]
+
+stretch = [
+    "pymc>=5.18",              # hierarchical factor models
+    "numpyro>=0.16",
+    "torch>=2.5",              # for torch-geometric
+    "torch-geometric>=2.6",    # GNNs on correlation networks
+    # "pandas-ta-openbb==0.4.24",  # only if you really want TA indicators
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qer"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
