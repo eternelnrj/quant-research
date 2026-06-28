@@ -582,3 +582,37 @@ def test_validate_accepts_class_share_when_format_matches():
     current_set_yahoo = {f"TICK{i:04d}" for i in range(499)} | {"BRK-B"}
 
     validate(df, current_set_yahoo)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Regression: a fresh add on the latest log date must not crash the build
+# ---------------------------------------------------------------------------
+
+
+def test_fresh_add_on_log_end_date_is_skipped_not_zero_length(patch_fetch):
+    """A ticker added on the most recent change date, with no removal and not
+    yet in the current-constituents snapshot, must be skipped - never emitted
+    as a zero-length (start == end) interval.
+
+    Regression test for the FLEX/MRVL build crash: such tickers used to be
+    closed at log_end_date, which equalled their own add date, producing an
+    interval validation rightly rejected.
+    """
+    current = _make_current(["AAPL", "MSFT"], date_added=["1982-12-12", "1994-06-01"])
+    changes = _make_changes(
+        [
+            ("2015-01-01", "XYZ", ""),
+            ("2018-06-15", "", "XYZ"),
+            ("2026-06-22", "FLEX", ""),  # added on the latest log date, no removal
+            ("2026-06-22", "MRVL", ""),
+        ]
+    )
+    patch_fetch(current, changes)
+
+    df = build_membership_table(yahoo_format=True)
+
+    both = df.dropna(subset=["start_date", "end_date"])
+    zero_len = both[both["start_date"] >= both["end_date"]]
+    assert zero_len.empty, f"zero-length intervals leaked: {list(zero_len['ticker'])}"
+    # The unreconciled fresh adds are skipped, not present.
+    assert not ({"FLEX", "MRVL"} & set(df["ticker"]))

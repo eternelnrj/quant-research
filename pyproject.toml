@@ -89,3 +89,16 @@ target-version = "py311"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+pythonpath = ["src", "."]
+
+[tool.mypy]
+python_version = "3.11"
+# Third-party libraries that ship no type information. mypy would otherwise
+# raise [import-untyped]/[import-not-found] for each. We treat their imports as
+# Any rather than vendoring stubs; the project's own code is still checked.
+# (pandas in particular: with pandas-stubs installed, mypy's strict pandas
+#  types surface many false positives in this DataFrame-heavy research code, so
+#  we intentionally leave pandas untyped here.)
+[[tool.mypy.overrides]]
+module = ["pandas.*", "scipy.*", "requests.*", "matplotlib.*"]
+ignore_missing_imports = true

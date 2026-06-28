@@ -1,239 +1,298 @@
 # Design Notes
 
 Rationale behind the structural choices in this repository, written from what
-the code actually does today rather than what the roadmap aspires to. The aim
-is honesty about the seams, so the next person (or the next phase) knows where
+the code actually does today rather than what the roadmap aspires to. The aim is
+to be honest about the seams, so the next person (or the next phase) knows where
 the bodies are buried.
 
 ## Module layout
 
 The package is organised by concern, behind a thin `src/qer/` namespace:
 
-- `config.py` — the single source of truth for every path and a couple of
-  date constants. 
-- `data/loader.py` — the `DataLoader`, the one interface the rest of the code
-  goes through for prices, returns, and the universe.
+- `config.py` — the single source of truth for every path and a couple of date
+  constants. Nothing else hard-codes a directory. This matters more than it
+  looks: the loaders bind these names at import time, which is exactly what lets
+  the tests redirect storage to a temp directory by patching the constants on
+  the importing module.
+- `data/` — observation ingestion and serving: `loader.py` (the `DataLoader`
+  for prices, returns, dollar volume, market return, market cap), `fundamentals.py`
+  (the point-in-time `FundamentalsLoader`), and `edgar.py` (the shared SEC EDGAR
+  client).
 - `universe/` — membership reconstruction (`wikipedia.py`), interval building
   and entity resolution (`membership.py`), and the curated correction tables
   (`renames.py`).
-- `factors/` — the factor library; momentum is the first member.
-- `diagnostics/` — evaluation (`factor_ic.py`) and data audit (`audit_data.py`).
+- `factors/` — the `Factor` ABC + registry (`base.py`) and eight factors.
+- `diagnostics/` — evaluation (`factor_ic.py`), long-short portfolios
+  (`portfolios.py`), FF5 exposures (`exposures.py`), multiple testing
+  (`multiple_testing.py`), the deflated Sharpe (`deflated_sharpe.py`), the
+  factor-zoo builder (`factor_zoo.py`), and the data audit (`audit_data.py`).
 
-The deliberate split is *logic in the package, narrative in the notebooks*. The
-diagnostic functions return data and figures; the numbered notebooks import
-them and add prose. This keeps the heavy code testable and the notebooks
-readable, and it is why the audit functions take a `loader` and an optional
-`ax` rather than drawing to the global pyplot state.
+The deliberate split is *logic in the package, narrative in the notebooks, thin
+wrappers in scripts*. Diagnostic functions return data and figures; the numbered
+notebooks import them and add prose; the `scripts/` files are CLI entry points
+that build a loader, call a package function, and write/print. This is why the
+factor-zoo logic lives in `diagnostics/factor_zoo.py` and `scripts/run_factor_zoo.py`
+is a one-call wrapper — so a notebook can `from qer.diagnostics.factor_zoo import
+build_factor_zoo_table` rather than reaching into `scripts/` (which isn't on the
+import path from a notebook's working directory).
+
+## data vs universe: two dimensions, one-way dependency
+
+`universe/` decides *which* securities are in scope and *when*; `data/` provides
+the *values* once they're in scope. The two packages never import each other —
+they are coupled only through the membership parquet that `universe` writes and
+the loader reads. That asymmetry is deliberate: `universe` is the lower layer
+that `data` sits on top of, and isolating "who was in the index when" into one
+folder concentrates all survivorship-correctness logic in one auditable place.
 
 ## DataLoader: lazy, cached, single-interface
 
-The loader presents three layers:
+The loader presents three layers: per-ticker raw parquet (the ingestion landing
+zone), wide `date x ticker` matrices per field (built on first access by
+pivoting every raw file, then cached to `data/wide/`), and derived views
+(returns, universe-filtered cross-sections, market cap). The cold build is
+expensive but happens once, the cache is re-derivable from raw (safe to
+`clean-cache`), and laziness means a process that only needs the universe never
+pays for the price pivot.
 
-1. **Per-ticker raw parquet** — one file per symbol, full history. This is the
-   ingestion landing zone and the unit of re-download.
-2. **Wide matrices** — `date x ticker` per field, built on first access by
-   reading every raw file and pivoting, then cached to `data/wide/`. Subsequent
-   reads hit the disk cache; an in-memory dict short-circuits even that within
-   a process.
-3. **Derived views** — returns and universe-filtered cross-sections, computed
-   on top of the wide matrices.
+The adjust convention is now explicit and consistent: `close` (and therefore
+returns) reads the `adj close` field, so splits and dividends never masquerade
+as returns; but `dollar_volume` and `market_cap` multiply by the **raw** `close`,
+because adjusted prices are rebased and would not match the share/volume counts
+they're paired with. SPY's `market_return` uses adjusted close (total return).
 
-The reasons for the lazy wide-cache rather than eager materialisation: the cold
-build is expensive (hundreds of file reads) but only needs to happen once, the
-cache is re-derivable from raw at any time (so it is safe to `clean-cache`), and
-keeping it lazy means a process that only needs the universe never pays for the
-price pivot.
+## Factors: vectorised panels, no look-ahead by construction
 
-The price convention is stated once and now consistent across modules:
-ingestion pulls with `auto_adjust=False`, so each raw file keeps a separate
-`Adj Close` column alongside the raw OHLC. The `close` accessor exposes that
-`adj close` field (split/dividend adjusted) and is what returns are computed
-from, on purpose, so that corporate actions don't masquerade as returns. The
-raw OHLC accessors (`open`, `high`, `low`) are deliberately *unadjusted* — only
-`adj close` is corrected — and `cross_section` defaults to the raw `close`
-field. That asymmetry between `close` (adjusted) and `cross_section`'s default
-(raw) is easy to trip over when adding a new accessor, so it is called out in
-each accessor's docstring.
+Each factor subclasses `Factor` and implements `compute_panel(loader)`, returning
+a `date x ticker` panel built in one vectorised pass with rolling/shift
+operations. Look-ahead is structurally impossible: a value at date *t* depends
+only on a trailing window ending at or before *t*, and insufficient history
+returns NaN, never zero, so downstream code must handle "no signal" explicitly
+rather than trade on a misleading flat value. The registry (`register` /
+`all_factors` / `get_factor`) lets the zoo iterate every factor uniformly. Raw
+panels are direction-agnostic; the harness multiplies by each factor's
+`direction` so orientation lives in one place.
+
+## Evaluation harness
+
+`compute_factor_ic` builds a factor's panel once via `compute_factor_panel`, then
+rank-correlates it against forward returns at multiple horizons (1/5/21-day),
+restricting each date's cross-section to the names actually in the index that
+day and dropping pairs missing either side. `summarize_ic` reports mean IC, IC
+IR, hit rate, a naive t-stat, and — because overlapping forward-return windows
+make the naive t-stat overstate significance — an optional Newey-West (Bartlett
+HAC) t-stat. `portfolios.factor_long_short` forms decile spreads; `exposures`
+regresses long-short returns on FF5 (numpy OLS point estimates, since
+`statsmodels` is declared but not importable in this environment) and reads
+every coefficient's t-stat - alpha and each beta - off one Newey-West HAC
+sandwich `(X'X)^-1 S (X'X)^-1`, so the overlap-awareness is consistent across
+the whole regression rather than HAC on alpha and plain OLS on the betas;
+`multiple_testing` applies
+Benjamini-Hochberg and Bonferroni across the zoo; its `pvalue_from_tstat` takes
+an *explicit* reference distribution rather than guessing one (`df=None` -> the
+standard normal, which is the asymptotic reference for the Newey-West `t_nw` the
+zoo feeds it; a caller-supplied `df` -> Student-t for a single-sample mean
+(`n-1`) or a regression coefficient (`n-k`)). And `deflated_sharpe` discounts the
+best Sharpe for the number of
+trials, fed an *overlap-aware* effective sample size (`n / primary_horizon`,
+since the long-short returns are horizon-day forward returns sampled daily) so
+it doesn't treat ~1000 correlated observations as independent. The deflated
+Sharpe's selection benchmark is scaled by the empirical cross-trial variance of
+the zoo's Sharpes. `factor_zoo.build_factor_zoo_table` ties these together into
+one table.
+
+`net_long_short` charges a linear turnover cost on *both* legs
+(`long_short_turnover` = long-top churn + short-bottom churn); charging the long
+leg alone would undercount trading cost by roughly half for a symmetric factor.
+The model is deliberately trading-cost-only — short-borrow and market-impact
+costs are deferred to the Phase 4 backtester.
+
+## SEC EDGAR ingest: point-in-time by filing date
+
+`data/edgar.py` is a small shared client (used by both the fundamentals and
+shares ingests): SEC-required User-Agent handling, ticker→CIK resolution,
+cached `companyfacts` fetch, and point-in-time parsing helpers. The key design
+choices, all in service of not lying to the backtest:
+
+- **`available_date` is the filing's actual `filed` date**, not an `end + lag`
+  guess. The lag constant survives only as a fallback for the rare entry with no
+  `filed` field.
+- **`dedup_point_in_time` keeps the earliest disclosure of each distinct
+  (period-end, value)** — dropping comparatives re-reported in later filings,
+  but keeping genuine restatements as new dated observations.
+- **Gross profit, when not tagged directly, is derived by pairing revenue and
+  cost within the *same filing* (by accession number).** Keying by period-end
+  alone would let a restated revenue be matched with an original cost, inventing
+  a gross-profit figure that appeared in no single filing.
+- **Shares outstanding collapse to one value per `available_date` by keeping the
+  latest period-end** on tied filing dates, so a same-day pair resolves to the
+  most current figure rather than an arbitrary input-order value.
+
+The Fama-French 5 ingest (`scripts/fetch_ff5.py`) parses Ken French's daily file,
+renames columns to `mkt_rf, smb, hml, rmw, cma, rf`, and divides by 100 so the
+factors are decimal returns on the same scale as the long-short series.
 
 ## Universe reconstruction: scrape forward, replay backward
 
 Rather than scrape old revisions of the Wikipedia page (whose formatting drifts
-across years and silently drops class-share tickers), the design scrapes *one*
-current snapshot plus the changes log, then reconstructs any past date by
-reversing every change after it: undo additions, restore removals. One fetch
-covers all of history, and the curated changes log is more reliable than
-archived page revisions. Both tables are cached to `data/raw/wikipedia/` on
-first fetch; `--refresh` forces a re-scrape.
-
-`wikipedia.get_universe(date)` implements that replay directly and is the most
-trustworthy path in the universe code — it is point-in-time correct (a name
-added in 2020 never appears in a 2018 universe) and applies the Wikipedia→Yahoo
-symbol mapping (`BRK.B → BRK-B`) so output is directly usable downstream.
-
-`membership.build_membership_table()` is the richer path: it walks the same
-events into explicit `(ticker, start, end)` intervals and applies entity
-resolution. Entity resolution is the genuinely hard part, and the conventions
-are encoded as data, not branches:
-
-- **Renames** collapse old symbols onto the current one, walking multi-step
-  chains (`WLP → ANTM → ELV`) cycle-safely.
-- **Acquisitions/delistings** are exits, not renames, and get explicit dates in
-  `TICKER_EXITS` for cases the changes log didn't record.
-- **Same-day swaps** are handled by a sort tiebreaker that processes removals
-  before additions, so a same-day remove+add yields two intervals meeting at
-  the date instead of a zero-length one.
-- **Dangling intervals** with no classification are closed conservatively at
-  the last log date (preserving the membership, sacrificing exit precision)
-  and surfaced as a warning rather than silently dropped.
-- **Fresh adds the snapshot hasn't caught up on** are a special case of the
-  above and treated differently: a ticker added on the most recent log date,
-  with no removal and not yet present in the current-constituents snapshot, is
-  *skipped* rather than closed at the last log date — closing it there would
-  equal its own start date and produce an illegal zero-length interval. This is
-  the two Wikipedia tables being momentarily out of sync (common right after an
-  S&P announcement); the skip is surfaced as a `NOTE` and self-heals once the
-  current table reconciles and the build is re-run with `--refresh`.
-
-The builder is deliberately *pure*: it reconstructs and returns the table with
-no I/O and no validation. Persisting to parquet and validating against the live
-current set (in the same Yahoo ticker format, so class shares line up) are the
-job of the CLI in `scripts/build_membership.py`. That separation is what lets
-the builder be exercised on tiny synthetic inputs from tests and notebooks
-without tripping the full-universe size check or writing to the real data
-directory. These correction tables are explicitly manual and will rot; the
-warnings on unclassified and pending-add tickers are the maintenance signal.
-
-## No-look-ahead by construction
-
-The momentum function does its window arithmetic by integer position on the
-slice `prices.loc[:as_of]`, never by calendar date. Positional indexing
-sidesteps weekend/holiday calendar bugs, and slicing to `as_of` up front means
-the only data the function *can* see is historical — look-ahead is structurally
-impossible, not merely avoided. Insufficient history returns NaN, never zero,
-so downstream code is forced to handle "no signal" explicitly rather than
-silently trading on a misleading flat value.
-
-The price-convention flag, `log_prices`, says whether the input is *already* in
-log space. It defaults to `False` — i.e. the common case of passing
-`DataLoader.close` (raw adjusted price levels), which the function then logs
-internally to produce a log-return momentum signal. Callers that have already
-taken logs pass `log_prices=True`. The flag returns the same log return either
-way; it only states whether the log has been taken yet.
-
-## Evaluation harness
-
-`factor_ic.compute_ic_series` takes a *factor function* as an argument rather
-than hard-coding momentum, so every future factor plugs into the same harness
-and is judged by the same IC / IR / t-stat / hit-rate summary. It restricts
-each date's cross-section to the names actually in the index that day, drops
-pairs missing either the factor or the forward return, and skips dates with too
-thin a cross-section (rather than emitting an unstable correlation).
-
-The harness feeds the factor function `np.log(close)`, so factors are evaluated
-in log space. Momentum is plugged in through a small explicit wrapper,
-`_momentum_12_1_logspace`, that calls `momentum_12_1(..., log_prices=True)` —
-making the "the harness passes log prices" contract visible at the call site
-rather than relying on a default. This is the seam that previously caused a
-double-log (the harness logging, then a `log_prices`-defaulted momentum logging
-again); the convenience path now matches intent.
+and silently drops class-share tickers), the design scrapes *one* current
+snapshot plus the changes log, then reconstructs any past date by reversing every
+change after it. `wikipedia.get_universe(date)` is the point-in-time-correct
+replay; `membership.build_membership_table()` walks the same events into explicit
+`(ticker, start, end)` intervals with entity resolution — renames collapsed onto
+the current symbol (cycle-safe multi-step chains), acquisitions/delistings as
+dated exits, same-day swaps ordered removal-before-addition, and dangling
+intervals closed conservatively with a warning. The correction tables are
+explicitly manual and will rot; the warnings are the maintenance signal.
 
 ## Sanity checks as first-class code
 
-The audit module encodes three checks that have caught real bugs in this class
-of project: no future leakage (the universe equals the set of covering
-intervals on a probe date), historical churn inside a two-sided band
-(survivorship-bias canary below, over-counted-exits canary above), and a
-plausibility band on SPY's annualised total return. The SPY check reads the
-dividend-adjusted `adj close` column, so it is a genuine *total*-return check;
-SPY is an ETF, not an index constituent, so it is fetched by its own small
-script (`scripts/fetch_spy.py` / `make spy`) rather than the constituent
-ingest. The checks are written to fail loudly with diagnostic messages, because
+The audit module encodes checks that catch real bugs in this class of project:
+no future leakage, historical churn inside a two-sided band (survivorship canary
+below, over-counted-exits canary above), missingness, and a plausibility band on
+SPY's annualised total return. They fail loudly with diagnostic messages, because
 a quiet data bug is far more expensive than a noisy assertion.
 
-## Reproducibility via the Makefile
+## Reproducibility and testing
 
-`make all` is the reviewer-facing contract: `install → data → audit → factors`
-from a clean clone, where `data` is `membership → ingest → sectors → spy`. The
-targets are intentionally all `.PHONY` — no file-based dependencies — because
-the real data files are gitignored and mtime tracking is brittle across
-machines. Cleanup is tiered (`clean` → `clean-cache` → `clean-data` →
-`clean-all`) so the cheap, safe reset is the default and the destructive
-re-download is opt-in.
+`make all` (`install → data → audit → factors`) is the reviewer-facing contract;
+targets are `.PHONY` because the real data files are gitignored and mtime
+tracking is brittle. Cleanup is tiered (`clean → clean-cache → clean-data →
+clean-all`).
 
-The `notebooks` target is deliberately *not* part of `make all`. Notebooks are
-human-read narrative, not build artifacts, and the numbered ones already call
-the same `diagnostics` functions that `audit` and `factors` run headless — so
-re-executing them in the build would duplicate work to no new artifact. Instead
-`make notebooks` is a standalone, non-mutating smoke test: it executes the
-notebooks to a discarded output (so committed files keep their cleared outputs)
-purely to catch API drift, and it needs a data build first.
+Tests are two-tiered: fast network-free unit tests poke each function with
+hand-crafted inputs (including synthetic EDGAR/Ken French payloads, so the
+parsing is pinned even though the live download isn't), and integration tests
+wire the real modules together in a temp directory. `pyproject.toml` sets
+`pythonpath = ["src", "."]` so both `qer` and `scripts` import regardless of how
+pytest is launched (bare `pytest`, `uv run pytest`, `python -m pytest`, or an
+IDE) — without it, `make test` and `python -m pytest` disagree, because only the
+latter puts the project root on the path.
 
-## Testing strategy
+## Honest seams in the current build
 
-Two tiers, mirrored in the Makefile:
+Documented deliberately:
 
-- **Unit** (`tests/unit`) — pure, fast, network-free, each function poked with
-  hand-crafted inputs. This includes a momentum price-convention test (raw
-  levels in, log returns out — never raw price differences), direct tests of
-  `validate` against well-formed and deliberately broken tables, and regression
-  tests pinning the previously-broken paths (the class-share validation format,
-  the zero-length fresh-add interval, the wide-cache rebuild). The live-scrape
-  universe tests skip cleanly when Wikipedia is unreachable rather than failing,
-  so the suite stays offline-safe.
-- **Integration** (`tests/integration`) — wires the real modules together
-  across boundaries. `test_end_to_end.py` builds small realistic datasets in a
-  temp directory, patches the loader's path constants at it, and exercises the
-  full chains: Wikipedia replay → universe; membership parquet → loader → audit
-  checks; price parquet → wide matrices → returns; prices → momentum → IC →
-  summary.
+- **Multi-class shares undercount market cap.** The cover-page shares figure for
+  names like GOOGL/GOOG or BRK-A/BRK-B captures a single class, so `market_cap`
+  (and the `size` factor) is wrong for those names until per-class aggregation is
+  added.
+- **`idio_skew_60d` is an approximation.** It uses a rolling per-date beta rather
+  than a single regression over the skew window, so its residuals don't come from
+  one coherent market model — a vectorisation shortcut, not the Kumar/Bali
+  single-window-regression definition. Cross-sectional rank agreement with the
+  textbook estimator is ~0.97, so the factor signal is close but the level is not
+  the textbook quantity. The docstring now states this plainly; the shortcut is
+  kept deliberately, and the exact construction is the fix to make if a writeup
+  cites the literature definition.
+- **The deflated Sharpe leans on two estimates.** Its selection benchmark is
+  scaled by the cross-trial Sharpe variance, which is estimated from only ~8
+  trials and is therefore noisy; and its overlap correction uses a heuristic
+  effective sample size (`n / primary_horizon`) rather than a formal
+  autocorrelation-based one. Both are reasonable and conservative, not exact.
+- **An "All-NaN slice encountered" RuntimeWarning** can surface (pandas-version
+  dependent) from rolling factors over entirely-missing ticker windows in the
+  survivorship-free panel. It is benign — those windows are correctly NaN — and
+  is also a faint data-quality signal of empty columns.
 
-The integration suite leans on two deterministic tricks. A pure
-exponential-drift price set makes both momentum and the forward return strictly
-monotonic in each ticker's drift, so the cross-sectional IC is *exactly* +1 —
-an exact end-to-end correctness assertion, not a fuzzy "looks positive". A
-fixed-seed random-walk set then provides genuine IC variance so the
-variance-sensitive summary statistics (IR, t-stat) are exercised reproducibly.
+## Phase 3: graph features (planned)
 
-## Known rough edges
+The notes below describe *design intent*, not shipped code — the graph layer is
+the next phase. They are recorded here so the structural decisions are settled
+before implementation. The governing constraint is that nothing about graph
+features gets its own evaluation path.
 
-Documented deliberately, in the spirit of the project's be-honest-about-the-
-seams ethos. 
+**A graph feature is a `Factor`.** Each relational signal — a centrality, a
+community label, a lead-lag in/out-degree, a text-neighbour return — produces the
+same `date x ticker` panel of node-level numbers as a classical factor,
+subclasses the existing `Factor` ABC, registers, and is judged by the Phase 2
+harness untouched. The first task of the phase is a *harness-reuse spike*: push an
+existing classical factor (e.g. momentum) through the whole graph evaluation path
+with neutralisation off and assert it reproduces the Phase 2 IC/Sharpe numbers —
+proving "a graph feature is a Factor" before any graph is built.
 
-- **Yahoo data gaps for delisted names.** A survivorship-bias-free universe
-  includes every name ever in the index since 2008, and a large fraction are
-  now delisted/acquired. yfinance does not reliably serve long-dead symbols, so
-  ingestion skips and reports roughly 150 of them. The pipeline degrades
-  gracefully (the IC and audit code drops NaN names per cross-section), but a
-  genuinely survivorship-clean backtest needs delisting-aware data from a better
-  source (Stooq via pandas-datareader, or CRSP/Norgate/Sharadar). The audit's
-  missingness heatmap is the tool for sizing the gap inside a given window.
+**The one structural difference: a per-rebalance loop, not a single vectorised
+pass.** A centrality or community label is a property of a graph built from a
+trailing window, so it cannot be written as a rolling/shift transform. The engine
+loops over monthly snapshot dates, builds the graph from the window ending at *t*,
+writes node features into the cross-section at *t*, then forward-fills to the
+daily panel between rebuilds. Monthly (not daily) rebuilds are a
+fidelity-and-clarity choice, not a compute necessity — a 120-250-day graph barely
+moves day to day. Compute is explicitly *not* the binding cost at ~500 names (a
+500x500 correlation is trivial, an MST near-instant, exact betweenness runs in
+seconds); the real costs are 10-K text ingestion and the multiple-testing burden
+of the configuration grid, so attention is spent there.
 
-- **Overlapping-window IC significance is optimistic.** `summarize_ic` computes
-  the IR and t-stat as if the daily ICs were independent, but a 21-day forward
-  return sampled every trading day overlaps its neighbours in 20 of 21 days, so
-  the effective sample is ~N/21 and the reported significance is overstated. A
-  Newey–West correction, or sampling ICs every `forward_days` to make them
-  non-overlapping, would give honest significance for the daily-frequency path.
+**One engine enforces correctness once** (`graphs/windows.py`, `graphs/panel.py`).
+The trailing-return matrix is sliced from the point-in-time universe with a
+minimum-history requirement (insufficient-history names are dropped, not
+zero-filled, so a fresh listing can't contaminate a correlation), the window looks
+strictly backward — the single look-ahead boundary — and the loop, the
+forward-fill, the cache, and the cross-sectional neutralisation all live in one
+place. A new graph feature is a pure function from a window to a per-name `Series`
+and inherits look-ahead-safety, survivorship discipline, and exposure control from
+the engine.
 
-- **The factor interface is an implicit convention.** The harness assumes a
-  `factor_func(prices_df, as_of_date) -> Series` callable, and the `log_prices`
-  flag negotiates price representation per call. That held for one factor, but
-  the flag remains a footgun and the implicit contract will not generalise to
-  factors needing different inputs (fundamentals, volume, returns). A formal
-  `Factor` protocol and a single decision about canonical input representation
-  are the right next structural move, before the factor library grows.
+**Construction choices that matter** (recorded so they aren't relitigated).
+Correlations are Ledoit-Wolf-shrunk before anything else — the cheapest defence
+against high-dimensional instability — and the window starts at 120 days, not 60.
+At least two sparsifiers are kept so a result isn't a one-method artefact: a hard
+threshold on `|rho|` and a minimum spanning tree on the Mantegna distance
+`d = sqrt(2(1-rho))` (PMFG optional). Two subtleties bite. Eigenvector centrality
+assumes non-negative weights (Perron-Frobenius), but correlations are signed, so
+it is computed on the MST *topology* (or on `|rho|`), never on the distance
+weights the tree was built from — distance weights would rank the most
+*dissimilar* nodes as most central and invert the ordering. And Louvain/Leiden
+community labels are stochastic, arbitrary integers, so any cross-snapshot
+"delta-community" feature must first align labels across consecutive snapshots
+(greedy Jaccard / Hungarian matching on membership overlap), or most of the
+apparent migration is relabelling noise.
 
-- **Per-date factor computation will not scale.** `compute_ic_series` loops over
-  dates and re-slices the price frame on each, which is fine for one factor over
-  a few years but is the obvious bottleneck once there are many factors over the
-  full universe and history. The factor layer needs to be rewritten so that instead of looping over dates and subsetting the price data, it computes the full factor values for all dates and all assets at once using vectorised matrix operations. 
+**Controlled before believed.** A relational feature is presumed to be a
+size/liquidity/sector exposure until neutralisation says otherwise, and presumed
+lucky until the full trial count says otherwise. The order of operations is fixed:
+raw feature -> cross-sectional neutralisation (rank-transform, then regress out log
+market cap, Amihud illiquidity, and GICS sector) -> decile long-short -> gross
+IC/Sharpe -> net Sharpe after a *both-leg* turnover cost (delta-centrality and
+lead-lag features are high-turnover, and a feature that survives only gross of
+cost is a market-structure finding, not a strategy) -> FF5 alpha -> unspanned
+alpha against the full classical set -> deflated Sharpe on the full trial count. A
+feature must clear every stage. Neutralisation and the spanning test are *not*
+redundant: the former removes a cross-sectional characteristic tilt (a stock's
+size, illiquidity, sector), the latter removes covariance with the classical
+factor *returns*; a feature can pass one and fail the other, so both run.
 
-- **Manual correction tables will rot.** `TICKER_RENAMES` and `TICKER_EXITS` are
-  curated by hand and lag corporate actions; the unclassified-ticker and
-  pending-add warnings are the only signal that they need topping up.
+**The spanning test, and what the bootstrap does and doesn't buy.** Unspanned
+alpha is the HAC intercept of the graph long-short regressed on the eight
+classical long-shorts (reusing `exposures._hac_ols_cov`); because the classical
+legs are themselves collinear, the intercept is read, not the loadings. For a
+single test asset that intercept t-stat *is* the spanning statistic — it equals
+the Gibbons-Ross-Shanken statistic (GRS reduces to t-squared for one asset), and
+the ex-post gain in maximum Sharpe from adding the feature equals its squared
+appraisal ratio `alpha^2 / sigma^2(eps)`, the same quantity the t measures. The
+block-bootstrap tangency view is therefore a *robustness check* against the fat
+tails of one daily series (it drops the iid-normal assumption GRS makes and the
+finite-sample HAC distortion), not an independent test or a power gain. Genuine
+extra power comes only from a joint multi-asset GRS across a basket of graph
+features, which aggregates many alphas rather than re-examining one.
 
-- **No committed sample data.** The notebooks and the `make notebooks` smoke
-  test depend on a prior `make data`, which depends on live Yahoo/Wikipedia, so
-  neither is runnable offline on a fresh clone. A tiny committed sample dataset
-  (or promoting the integration suite's synthetic-data fixtures to a
-  `make sample-data`) would make both offline- and CI-friendly.
+**Honest seams named up front.** Lead-lag effects are weak and decay fast in
+liquid large-caps — this class is the *expected* failure/decay case the done-when
+criterion requires, and the FDR-vs-shuffled-null comparison is built so that "no
+real edge structure here" is a presentable finding rather than a dead end. Granger
+causality stays off the critical path because `statsmodels` is declared but not
+importable in this environment, so the lead-lag engine is a numpy lagged
+cross-correlation with a Bartlett edge test (per-(pair, lag) standard error
+`~ 1/sqrt(T)`, valid when the residual series are approximately white) and BH FDR;
+Granger is gated behind adding `statsmodels` as a genuine dependency. Text
+ingestion is the largest new lift and the biggest data-quality unknown: a per-year
+coverage report (parseable Item 1 fraction, embedding-success rate, sanity of a
+few firms' nearest neighbours) is a gate that must appear on the scorecard before
+any text signal is trusted, and `sentence-transformers`/`torch` live behind an
+optional `text` extra so the factor skips rather than crashes when the stack is
+absent. The single largest risk is self-deception via the trial count: the grid
+(windows x sparsifiers x centralities x communities x lead-lag lags x kNN) is
+easily hundreds of features, so it is pre-registered before forward returns are
+looked at, every configuration is logged to a trials ledger
+(`data/graphs/trials.parquet`) pass or fail, and the deflated Sharpe and the BH
+step are fed the *total* grid size, not the count of reported winners.

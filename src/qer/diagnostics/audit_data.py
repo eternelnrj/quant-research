@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-# from qer.config import AUDIT_DIR, RAW_DIR, SENTINEL_END  # DATA_DIR,
+# from qer.config import AUDIT_DIR, RAW_DIR, SENTINEL_END  # DATA_DIR,           # NO CHANGES from phase 2
 from qer.config import AUDIT_DIR, SECTORS_FILE, SENTINEL_END, SPY_FILE
 from qer.data.loader import DataLoader
 
@@ -205,9 +205,6 @@ def plot_return_distribution_by_year(loader: DataLoader, ax=None):
 # ---------------------------------------------------------------------------
 
 
-# SECTORS_FILE = RAW_DIR / "sectors.parquet"
-
-
 def load_sectors() -> pd.Series | None:
     """Load per-ticker sector mapping if it exists.
 
@@ -363,16 +360,25 @@ def check_spy_total_return(spy_file: Path | None = None, tolerance: float = 0.01
         return
 
     spy = pd.read_parquet(spy_file)
-    if "close" not in spy.columns:
-        spy.columns = [c.lower() for c in spy.columns]
+    spy.columns = [str(c).lower() for c in spy.columns]
 
-    spy = spy.dropna(subset=["close"]).sort_index()
+    # TOTAL return (dividends reinvested) requires the dividend/split-adjusted
+    # series. The raw "close" column is price return only; using it would drop
+    # SPY's dividends (~1.5-2%/yr) and understate the total return.
+    if "adj close" not in spy.columns:
+        print(
+            f"SKIP: {spy_file} has no 'adj close' column. This check needs the "
+            "dividend-adjusted series; re-fetch with `make spy` (auto_adjust=False)."
+        )
+        return
+
+    spy = spy.dropna(subset=["adj close"]).sort_index()
     if len(spy) < 100:
         print(f"SKIP: only {len(spy)} SPY data points, too sparse to check.")
         return
 
-    start_price = spy["close"].iloc[0]
-    end_price = spy["close"].iloc[-1]
+    start_price = spy["adj close"].iloc[0]
+    end_price = spy["adj close"].iloc[-1]
     start_date = spy.index[0]
     end_date = spy.index[-1]
 
@@ -380,8 +386,8 @@ def check_spy_total_return(spy_file: Path | None = None, tolerance: float = 0.01
 
     # The "published value" comparison is approximate because we don't know
     # exactly what reference the user wants. Provide a useful range check:
-    # SPY (with dividends reinvested via auto_adjust) should grow roughly
-    # 7-12% annualized over a typical 10+ year period.
+    # SPY total return (from the dividend-adjusted "adj close" series) should
+    # grow roughly 7-12% annualized over a typical 10+ year period.
     n_years = (end_date - start_date).days / 365.25
     annualized = (1 + total_return) ** (1 / n_years) - 1
 
@@ -397,10 +403,57 @@ def check_spy_total_return(spy_file: Path | None = None, tolerance: float = 0.01
     # Use a wide band that catches catastrophic errors (negative, or 30%+).
     assert 0.02 <= annualized <= 0.20, (
         f"Annualized SPY return of {annualized:.1%} is implausible. "
-        "Check that prices are adjusted for dividends (auto_adjust=True) "
-        "and that the date range is correct."
+        "Check that the total return uses the dividend-adjusted 'adj close' "
+        "column (auto_adjust=False convention) and that the date range is correct."
     )
     print(f"PASS: SPY return within plausible band (tolerance={tolerance:.0%})")
+
+
+def check_price_adjustment(
+    loader,
+    extreme_log_ret: float = 0.40,
+    max_unadjusted_frac: float = 0.5,
+) -> None:
+    """Audit the per-ticker ADJUSTED price history (the series factors consume).
+
+    Two tripwires; asserts only the egregious one.
+      1) Extreme single-day moves |adj-close log return| > ``extreme_log_ret``,
+         listed per ticker for eyeball review. A cluster in one name usually
+         means an uncorrected split rather than a real move - but genuine
+         crashes / M&A exist, so this is a review flag, not a hard failure.
+      2) Adjustment actually applied: tickers whose adj-close returns equal the
+         raw-close returns on EVERY overlapping day are either unadjusted (the
+         per-ticker analogue of the SPY raw-vs-adjusted bug) or simply paid no
+         dividend/split in the window. A *large fraction* of the universe being
+         identical means the adjustment step never ran - that we assert on.
+    """
+    import numpy as np
+
+    adj = loader.close
+    raw = loader._load_wide("close")
+    cols = adj.columns.intersection(raw.columns)
+    adj_ret = np.log(adj[cols] / adj[cols].shift(1))
+    raw_ret = np.log(raw[cols] / raw[cols].shift(1))
+
+    extreme = (adj_ret.abs() > extreme_log_ret).sum()
+    flagged = extreme[extreme > 0].sort_values(ascending=False)
+
+    overlap = (adj_ret.notna() & raw_ret.notna()).sum()
+    agree = ((adj_ret - raw_ret).abs() < 1e-9).sum()  # counts overlapping ~equal days only
+    identical = agree[(overlap > 0) & (agree == overlap)].index
+    frac_unadjusted = len(identical) / max(len(cols), 1)
+
+    print(f"Tickers checked:                {len(cols)}")
+    print(
+        f"Extreme |adj ret| > {extreme_log_ret:.2f} (review): "
+        f"{int(extreme.sum())} days across {len(flagged)} names {list(flagged.index[:5])}"
+    )
+    print(f"Identical-to-raw (unadjusted?): {len(identical)} ({frac_unadjusted:.1%})")
+    assert frac_unadjusted < max_unadjusted_frac, (
+        f"{frac_unadjusted:.0%} of tickers have adj-close == raw-close returns; "
+        "the dividend/split adjustment likely did not run."
+    )
+    print("PASS: adjustment applied across the universe (review any flagged names above).")
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """
-Phase 2 / Session 11: 12-1 month momentum factor.
+12-1 month momentum factor.
 
 Definition: cumulative return from T-252 trading days to T-21 trading days.
 The most recent month (~21 trading days) is excluded to avoid short-term
@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+# Imported lazily to avoid a circular import at module load.
+from qer.factors.base import Factor, register  # noqa: E402           # NEW
 
 
 def momentum(
@@ -117,3 +120,38 @@ def momentum_12_1(prices_df, as_of_date, log_prices: bool = False) -> pd.Series:
     directly yields a proper log-return momentum signal.
     """
     return momentum(prices_df, as_of_date, lookback_days=252, skip_days=21, log_prices=log_prices)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: vectorised panel + Factor interface                                                 # NEW
+# ---------------------------------------------------------------------------
+
+
+def momentum_panel(
+    prices_df: pd.DataFrame,
+    lookback_days: int,
+    skip_days: int,
+    log_prices: bool = False,
+) -> pd.DataFrame:
+    """Vectorised ``date x ticker`` momentum panel.
+
+    Equivalent to calling :func:`momentum` at every date, but in one pass:
+    at row t the value is ``logP[t-skip] - logP[t-lookback]``, which is exactly
+    ``logP.shift(skip) - logP.shift(lookback)``. Look-ahead-safe (each row uses
+    only earlier rows).
+    """
+    logp = prices_df if log_prices else np.log(prices_df)
+    return logp.shift(skip_days) - logp.shift(lookback_days)
+
+
+class Momentum12_1(Factor):
+    """Canonical 12-1 momentum as a registered Factor (252d lookback, 21d skip)."""
+
+    name = "momentum_12_1"
+    direction = +1
+
+    def compute_panel(self, loader) -> pd.DataFrame:
+        return momentum_panel(loader.close, lookback_days=252, skip_days=21)
+
+
+register(Momentum12_1())

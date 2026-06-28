@@ -85,7 +85,7 @@ def fetch_sp500_tables(force_refresh: bool = False):
         if isinstance(col, tuple):
             parts = [str(p).strip().lower() for p in col if str(p).strip()]
             # Collapse repeats: ('Date', 'Date') -> 'date'
-            deduped = []
+            deduped: list[str] = []
             for p in parts:
                 if not deduped or deduped[-1] != p:
                     deduped.append(p)

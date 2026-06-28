@@ -5,9 +5,9 @@ One-off build script. Produces a DataFrame with one row per
 (entity, contiguous membership interval) and saves it to parquet:
 
     ticker      start_date    end_date
-    AAPL        1982-11-30    2099-12-31     (still in index)
-    BKNG        1999-04-01    2099-12-31     (incorporates PCLN history)
-    META        2013-12-23    2099-12-31     (incorporates FB history)
+    AAPL        1982-11-30    NaT            (still in index)
+    BKNG        1999-04-01    NaT            (incorporates PCLN history)
+    META        2013-12-23    NaT            (incorporates FB history)
     LEHM        NaT           2008-09-15     (added before log, removed 2008)
     CCR         <added>       2008-07-01     (acquired; closed via TICKER_EXITS)
 
@@ -23,7 +23,7 @@ Entity resolution:
   their removal, use TICKER_EXITS to supply the acquisition date.
 
 Conventions:
-  * end_date = NaT means "still in the index".                      # MODIF
+  * end_date = NaT means "still in the index".
   * NaT in start_date means the addition predates the changes log.
   * Tickers absent from both TICKER_RENAMES and TICKER_EXITS, but with
     dangling-open intervals, are closed conservatively at the latest

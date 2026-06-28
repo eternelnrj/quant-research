@@ -23,8 +23,8 @@ PYTEST_ARGS ?= -q
 # ---------------------------------------------------------------------------
 
 .PHONY: help install \
-        membership ingest sectors data \
-        audit factors \
+        membership ingest sectors spy data membership-refresh \
+        audit factors notebooks shares fundamentals ff5 \
         test test-unit test-integration test-fast test-cov \
         lint format typecheck check \
         clean clean-data clean-cache clean-all \
@@ -44,11 +44,13 @@ help:
 	@echo "  membership      Rebuild S&P 500 membership table from Wikipedia"
 	@echo "  ingest          Pull per-ticker price data via yfinance"
 	@echo "  sectors         Pull per-ticker sector metadata via yfinance"
-	@echo "  data            Run all data-build steps (membership + ingest + sectors)"
+	@echo "  spy             Pull SPY benchmark history (for the audit check)"
+	@echo "  data            Run all data-build steps (membership + ingest + sectors + spy)"
 	@echo ""
 	@echo "Analysis:"
 	@echo "  audit           Run data-audit charts and sanity checks"
 	@echo "  factors         Compute and plot factor IC analyses"
+	@echo "  notebooks       Execute the narrative notebooks as a smoke test (needs data)"
 	@echo ""
 	@echo "Quality:"
 	@echo "  test            Run all tests"
@@ -97,6 +99,7 @@ sectors:
 
 spy:
 	$(PYTHON) -m scripts.fetch_spy
+
 # Full data build. membership must run before ingest because ingest reads
 # the membership table to know which tickers to fetch.
 data: membership ingest sectors spy
@@ -109,8 +112,37 @@ audit:
 	$(PYTHON) -m scripts.audit_data
 
 factors:
-	$(PYTHON) -m scripts.factor_ic
+	$(PYTHON) -m scripts.run_factor_zoo
 
+# Optional, network-dependent data for the data-gated factors (size,
+# value, quality). Both are scaffolds - see the scripts. Not in `data`.
+shares:
+	$(PYTHON) -m scripts.ingest_shares
+
+fundamentals:
+	$(PYTHON) -m scripts.ingest_fundamentals
+
+ff5:
+	$(PYTHON) -m scripts.fetch_ff5
+
+# Smoke-test that the narrative notebooks still execute end-to-end against the
+# current code (catches API drift, e.g. a renamed function). NOT part of `all`:
+# notebooks are human-read narrative, not build artifacts, and this needs the
+# data present (run `make data` first). Non-mutating - executes to a discarded
+# output so the committed notebooks keep their cleared outputs. The active uv
+# venv supplies the kernel, so a registered `qr-env` kernel is not required.
+NOTEBOOKS := notebooks/01_data_audit.ipynb notebooks/02_first_factor_momentum.ipynb
+# Dedicated .PHONY (in addition to the consolidated one above): the target name
+# collides with the notebooks/ directory, so without this Make would consider
+# `notebooks` "up to date" and skip the recipe.
+.PHONY: notebooks
+notebooks:
+	@for nb in $(NOTEBOOKS); do \
+		echo "Executing $$nb ..."; \
+		$(PYTHON) -m jupyter nbconvert --to notebook --execute --stdout \
+			--ExecutePreprocessor.kernel_name=python3 "$$nb" > /dev/null || exit 1; \
+	done
+	@echo "Notebooks executed cleanly (committed files unchanged)."
 
 # ---------------------------------------------------------------------------
 # Quality

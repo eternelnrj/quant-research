@@ -1,5 +1,5 @@
 """
-First factor IC plot.
+Phase 2 / Session 12: First factor IC plot.
 
 For each trading date in the sample, compute the Spearman correlation
 between the 12-1 momentum factor and the forward 21-day return across
@@ -140,12 +140,13 @@ def compute_ic_series(
 # ---------------------------------------------------------------------------
 
 
-def summarize_ic(ic: pd.Series) -> dict:
+def summarize_ic(ic: pd.Series, newey_west_lags: int | None = None) -> dict:
     """Compute mean IC, IC IR, t-stat, hit rate.
 
-    IC (daily):       0.01 - 0.04 for a known classical factor
-    IC IR (ann.):     0.3 - 1.0
-    t-stat of IC:     1.5 - 3.0 for a good single factor
+    Roadmap section 16.1 calibration:
+        IC (daily):       0.01 - 0.04 for a known classical factor
+        IC IR (ann.):     0.3 - 1.0
+        t-stat of IC:     1.5 - 3.0 for a good single factor
     """
     n = len(ic)
     if n == 0:
@@ -165,7 +166,7 @@ def summarize_ic(ic: pd.Series) -> dict:
     # For a positive-mean signal, this is fraction-positive.
     hit_rate = (np.sign(ic) == np.sign(mean_ic)).mean()
 
-    return {
+    result = {
         "n": n,
         "mean_ic": mean_ic,
         "std_ic": std_ic,
@@ -175,6 +176,9 @@ def summarize_ic(ic: pd.Series) -> dict:
         "date_min": ic.index.min(),
         "date_max": ic.index.max(),
     }
+    if newey_west_lags is not None:
+        result["t_stat_nw"] = newey_west_tstat(ic.values, lags=newey_west_lags)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -295,13 +299,18 @@ def run_momentum_ic_analysis(
         sample_dates=sample_dates,
     )
 
-    summary = summarize_ic(ic)
+    summary = summarize_ic(ic, newey_west_lags=forward_days - 1)
     print(f"\nMomentum 12-1 vs {forward_days}-day forward return")
     print(f"  N days computed:    {summary['n']}")
     print(f"  Mean IC:            {summary['mean_ic']:+.4f}")
     print(f"  Std IC:             {summary['std_ic']:.4f}")
     print(f"  IC IR (annualized): {summary['ic_ir_annualized']:+.3f}")
-    print(f"  t-stat of IC:       {summary['t_stat']:+.2f}")
+    print(f"  t-stat (naive):     {summary['t_stat']:+.2f}")
+    # The daily ICs overlap (h-day forward return), so the naive t-stat is
+    # inflated; the Newey-West (lag = h-1) value is the one to trust. IC IR is a
+    # descriptive stability ratio, not a significance test, so it is left as the
+    # standard mean/std*sqrt(252) and is NOT NW-adjusted.
+    print(f"  t-stat (NW, lag {forward_days - 1}): {summary['t_stat_nw']:+.2f}   <- report this one")
     print(f"  Hit rate:           {summary['hit_rate']:.1%}")
 
     # Calibrate against roadmap expectations.
@@ -332,3 +341,79 @@ def run_momentum_ic_analysis(
         plt.close(fig)
 
     return ic, summary
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: panel-based, multi-horizon IC + Newey-West significance
+# ---------------------------------------------------------------------------
+
+from qer.factors.base import Factor, compute_factor_panel  # noqa: E402
+
+
+def newey_west_tstat(x, lags: int) -> float:
+    """t-stat of the mean of ``x`` with a Newey-West (Bartlett) HAC variance.
+
+    For daily ICs computed against an h-day forward return, consecutive ICs
+    overlap, so the naive mean/std*sqrt(N) t-stat is inflated. Setting
+    ``lags = h - 1`` corrects for that autocorrelation.
+    """
+    x = np.asarray(x, dtype=float)
+    x = x[~np.isnan(x)]
+    n = x.size
+    if n < 2:
+        return np.nan
+    e = x - x.mean()
+    var = (e @ e) / n  # gamma_0
+    for lag in range(1, min(lags, n - 1) + 1):
+        w = 1.0 - lag / (lags + 1)
+        var += 2.0 * w * (e[lag:] @ e[:-lag]) / n
+    se = np.sqrt(var / n)
+    return x.mean() / se if se > 0 else np.nan
+
+
+def forward_return_panel(loader, horizon: int) -> pd.DataFrame:
+    """``date x ticker`` forward log return over ``horizon`` trading days."""
+    logc = np.log(loader.close)
+    return logc.shift(-horizon) - logc
+
+
+def _universe_mask(loader, index, columns) -> pd.DataFrame:
+    """Boolean date x ticker mask of index membership on each date."""
+    mask = pd.DataFrame(False, index=index, columns=columns)
+    colset = set(columns)
+    for t in index:
+        members = [c for c in loader.get_universe(t) if c in colset]
+        mask.loc[t, members] = True
+    return mask
+
+
+def compute_factor_ic(
+    loader,
+    factor: Factor,
+    horizons=(1, 5, 21),
+    dates=None,
+    min_cross_section: int = 30,
+    restrict_universe: bool = True,
+) -> dict[int, pd.Series]:
+    """Multi-horizon cross-sectional Spearman IC for a Factor, vectorised.
+
+    Builds the (direction-oriented) factor panel once via
+    :func:`compute_factor_panel`, then row-wise rank-correlates it with the
+    forward-return panel at each horizon. Returns ``{horizon: IC series}``.
+    """
+    panel = compute_factor_panel(loader, factor, dates=dates, oriented=True)
+    panel = panel.dropna(how="all")
+    cols = panel.columns
+    if restrict_universe:
+        panel = panel.where(_universe_mask(loader, panel.index, cols))
+
+    out: dict[int, pd.Series] = {}
+    for h in horizons:
+        fwd = forward_return_panel(loader, h).reindex(index=panel.index, columns=cols)
+        ic = panel.corrwith(fwd, axis=1, method="spearman")
+        n_pairs = (panel.notna() & fwd.notna()).sum(axis=1)
+        ic = ic[n_pairs >= min_cross_section].dropna()
+        ic.name = f"ic_{h}d"
+        ic.index.name = "date"
+        out[h] = ic
+    return out

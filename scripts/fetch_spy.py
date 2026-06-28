@@ -8,7 +8,7 @@ S&P 500 constituent, so it is never pulled by ingest_prices.py; this script
 fills that gap.
 
 Pulled with auto_adjust=False to match the project convention, so the file
-keeps a separate ``Adj Close`` column (the dividend-adjusted total-return
+keeps a separate ``adj close`` column (the dividend-adjusted total-return
 series the check prefers) alongside the raw OHLC.
 
 Usage:
@@ -18,10 +18,7 @@ Usage:
 import pandas as pd
 import yfinance as yf
 
-# from qer.config import END_DATE, RAW_DIR, START_DATE
-from qer.config import END_DATE, RAW_DIR, SPY_FILE, START_DATE  # line 21
-
-# SPY_FILE = RAW_DIR / "SPY.parquet"
+from qer.config import END_DATE, RAW_DIR, SPY_FILE, START_DATE
 
 if __name__ == "__main__":
     RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -44,6 +41,7 @@ if __name__ == "__main__":
     # column names, so flatten to the price-field level first.
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+        df.rename(columns=str.lower, inplace=True)
 
     df.to_parquet(SPY_FILE)
     print(f"Wrote {len(df)} rows to {SPY_FILE} ({df.index[0].date()} -> {df.index[-1].date()})")

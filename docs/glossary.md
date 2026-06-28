@@ -249,3 +249,128 @@ A node's importance in a network (degree, eigenvector, betweenness). Computed on
 correlation graphs (e.g. minimum spanning trees, k-NN graphs) to capture how
 
 central a stock is in the cross-asset correlation structure.
+
+### Correlation network
+
+A graph whose nodes are stocks and whose edges encode the trailing-window return
+correlation between them. The raw correlation matrix is shrunk and then sparsified
+(see *sparsifier*) before any node feature is computed, because the dense matrix is
+mostly estimation noise at 500 names.
+
+### Minimum spanning tree (MST)
+
+The cheapest connected subgraph touching every node, built here on the Mantegna
+distance so that strongly correlated stocks sit close together. A parameter-free,
+connected backbone of the correlation network — unlike a hard-threshold graph, it
+cannot fragment.
+
+### Mantegna distance
+
+The metric `d = sqrt(2(1 - rho))` that turns a correlation `rho` into a distance
+(perfectly correlated -> 0, uncorrelated -> sqrt(2), perfectly anti-correlated ->
+2). Converts the correlation matrix into something a spanning-tree / distance
+algorithm can consume.
+
+### Ledoit-Wolf shrinkage
+
+A well-conditioned covariance estimator that pulls the noisy sample covariance
+toward a structured target. Applied before forming correlations so high-dimensional
+instability does not propagate into the centralities — the cheapest single defence
+against the correlation-instability pitfall.
+
+### Sparsifier
+
+A rule that keeps only the informative edges of a dense correlation graph. The
+project uses at least two (a hard threshold on `|rho|` and an MST; PMFG optional)
+so a result is not an artefact of one filtering method.
+
+### Eigenvector centrality
+
+A centrality scoring a node highly when it connects to other high-scoring nodes
+(co-moving with well-connected stocks). It assumes non-negative edge weights
+(Perron-Frobenius), so on a signed correlation graph it is computed on the MST
+topology or on `|rho|`, never on distance weights — which would invert the ordering.
+
+### Betweenness centrality
+
+How often a node lies on shortest paths between other nodes — a measure of being a
+bridge between otherwise separate clusters. Exact computation is O(n^3); the plan
+operates on the MST / largest component and uses `igraph` or an approximation.
+
+### Community detection
+
+Partitioning the network into densely connected groups (Louvain / Leiden,
+maximising modularity). Used both as a membership factor and as the input to the
+cluster-vs-sector confusion matrix that checks whether the communities are just
+GICS sectors in disguise.
+
+### Label alignment
+
+Matching the arbitrary integer labels Louvain/Leiden assign to communities across
+consecutive snapshots (greedy Jaccard / Hungarian on membership overlap). Required
+before any "did this stock change community" feature, or relabelling noise
+masquerades as real migration.
+
+### Lead-lag network
+
+A *directed* graph with an edge i -> j when stock i's market-residualised returns
+lead j's at lags of 1-5 days. Edges are tested with a Bartlett standard error,
+FDR-controlled, and compared to a shuffled-returns null; in-degree and out-degree
+(followers and leaders) become separate factors.
+
+### Bartlett edge test
+
+The approximation that, under a no-lead-lag null, the lag-k cross-correlation of
+two near-white residual series has standard error `~ 1/sqrt(T)`, giving each
+candidate edge a z-score and p-value. The primary lead-lag engine here, since
+`statsmodels` (and thus a reliable Granger test) is not importable in this
+environment.
+
+### Shuffled-returns null
+
+A baseline built by circularly shuffling the return series to destroy genuine
+lead-lag structure while preserving marginal properties. Surviving edge density is
+reported against this null so that "no real edge structure" is a defensible finding
+rather than a dead end.
+
+### Text-similarity network (TNIC)
+
+A graph linking firms whose 10-K *Business* (Item 1) descriptions are similar — a
+data-driven, Hoberg-Phillips-style alternative to fixed GICS sectors. Built as a
+cosine k-nearest-neighbour graph over sentence-transformer embeddings.
+
+### Neighbour-return signal
+
+The average recent return of a firm's text-graph neighbours — an
+industry-momentum-style predictor that uses the text-similarity network in place of
+a sector label.
+
+### Cross-sectional neutralisation
+
+Removing a feature's mechanical tilt toward known characteristics before testing
+it: rank-transform the feature, regress out log market cap, Amihud illiquidity, and
+sector, and form the long-short on the residual. If neutralisation destroys the
+signal, the "relational" feature was a known exposure in disguise — a valuable
+early negative result.
+
+### Spanning test
+
+A regression of a candidate factor's long-short returns on an existing set of
+factor returns; a non-zero HAC intercept ("unspanned alpha") means the candidate
+adds something the existing set does not. Distinct from neutralisation: this
+removes covariance with factor *returns*, neutralisation removes a cross-sectional
+*characteristic* tilt.
+
+### Gibbons-Ross-Shanken (GRS) statistic
+
+The standard test of whether adding one or more assets improves the mean-variance
+frontier. For a *single* test asset it reduces to the squared t-stat of the
+spanning-regression intercept, which is why that intercept t *is* the spanning
+statistic; genuine extra power comes only from a joint test across many assets.
+
+### Trials ledger
+
+A pass-or-fail log of every configuration evaluated in the pre-registered grid
+(`data/graphs/trials.parquet`). The deflated Sharpe and Bonferroni/BH steps are fed
+the total number of trials run, not the number of reported winners — the single
+most important guard against fooling yourself in Phase 3.
