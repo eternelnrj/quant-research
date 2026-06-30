@@ -32,7 +32,16 @@ WIDE_DIR = DATA_DIR / "wide"
 AUDIT_DIR = DATA_DIR / "audit"
 FACTOR_REPORT_DIR = DATA_DIR / "factors"  # per-factor IC/portfolio report artifacts
 
+
+# Phase 3 (graph-based features). The configuration grid is pre-registered once
+# (immutable denominator for multiple-testing corrections); the trials ledger is
+# the append-only audit log of every configuration actually evaluated.
+GRAPHS_DIR = DATA_DIR / "graphs"
+GRAPH_GRID_FILE = GRAPHS_DIR / "grid.parquet"
+GRAPH_TRIALS_FILE = GRAPHS_DIR / "trials.parquet"
+
 SENTINEL_END = pd.Timestamp("2099-12-31")
+
 
 # Point-in-time fundamentals lag: only use a filing once it is `available_date`
 # old enough. 45-90 days is the roadmap convention; 60 is a reasonable default.
