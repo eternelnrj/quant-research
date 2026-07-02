@@ -75,6 +75,22 @@ stretch = [
     # "pandas-ta-openbb==0.4.24",  # only if you really want TA indicators
 ]
 
+# Phase 3 graph features. The base install needs nothing extra for Subphase 3.1
+# (grid, ledger, harness-reuse spike use only numpy/pandas/scipy, already core);
+# these groups are pulled in as the construction subphases land.
+graphs = [
+    "networkx>=3.2",           # clear graph API
+    "python-igraph>=0.11",     # fast betweenness / large graphs
+    "scikit-learn>=1.4",       # Ledoit-Wolf shrinkage, cosine similarity
+    "python-louvain>=0.16",    # community detection
+    "leidenalg>=0.10",         # Leiden communities
+]
+
+text = [
+    "sentence-transformers>=2.6",  # 10-K business-text embeddings
+    "torch>=2.2",                  # heavy; isolated here so the text factor can skip
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
