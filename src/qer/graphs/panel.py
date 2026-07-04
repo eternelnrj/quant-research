@@ -58,7 +58,12 @@ def build_feature_panel(
     reads a stale snapshot. The daily panel is forward-filled between rebuilds;
     dates before the first snapshot are NaN (you do not have a graph yet). Names
     that drop out of a later snapshot keep a forward-filled value, which the
-    harness removes via its per-date universe mask.
+    harness removes via its per-date universe mask. After the final rebuild the most
+    recent graph is held forward to the end of the calendar -- the *current-period
+    hold*, bounded by the rebalance frequency (at most one period, since the last
+    snapshot is a month-end inside ``cal``). That is exactly the signal a live
+    strategy trades between rebuilds; the harness in turn drops the final dates where
+    forward returns are unavailable.
     """
     cal = loader.close.index
     if min_obs is None:
@@ -76,6 +81,8 @@ def build_feature_panel(
         if rw.shape[1] == 0:
             continue
         s = pd.Series(snapshot_fn(rw, list(rw.columns)))
+        if len(s) == 0:
+            continue
         if cp is not None:
             s.to_frame("value").to_parquet(cp)
         rows[t] = s
@@ -104,7 +111,12 @@ def neutralize_cross_section(
     ``by``      : numeric control panels, ``{name: date x ticker}`` (e.g. log market
                   cap, Amihud illiquidity). Rank-transformed when ``rank=True``.
     ``sectors`` : ticker->label Series (static) or ``date x ticker`` label frame,
-                  entered as dummy columns (i.e. sector-demeaning).
+                  entered as dummy columns (i.e. sector-demeaning). Names with a
+                  missing sector label are dropped for that date (not absorbed into
+                  the reference category). A label *frame* that lacks a date is
+                  treated as "no sector info for that date": the residual is taken on
+                  the numeric controls alone, mirroring how a numeric control missing
+                  that date is handled.
     Dates with fewer than ``min_names`` usable names are left NaN. A feature that
     is an exact (monotone) function of a control neutralises to ~0.
     """
@@ -120,10 +132,24 @@ def neutralize_cross_section(
         for cname, panel in by.items():
             if t in panel.index:
                 design[cname] = panel.loc[t]
-        # align on names present in y and in every numeric control
+
+        # per-date sector labels: a static ticker->label Series, or the row of a
+        # date x ticker frame. A frame that lacks date t means "no sector info here".
+        sect_labels = None
+        if sectors is not None:
+            if isinstance(sectors, pd.DataFrame):
+                sect_labels = sectors.loc[t] if t in sectors.index else None
+            else:
+                sect_labels = sectors
+
+        # align on names present in y and in every numeric control; and, if sectors
+        # are used, only names that actually carry a label (unlabelled names are
+        # dropped, not silently lumped into the reference category)
         names = pd.Index(cols)
         for cname, cser in design.items():
             names = names.intersection(cser.dropna().index)
+        if sect_labels is not None:
+            names = names.intersection(sect_labels.dropna().index)
         names = names.intersection(y_full.index)
         if len(names) < min_names:
             continue
@@ -135,14 +161,12 @@ def neutralize_cross_section(
             col = design[cname].loc[names]
             col = _ranked(col) if rank else col
             Xcols.append(col.to_numpy(dtype=float))
-        # sector dummies (drop first level to avoid collinearity with the intercept)
-        if sectors is not None:
-            lab = sectors.loc[t] if isinstance(sectors, pd.DataFrame) and t in sectors.index else sectors
-            if isinstance(lab, pd.Series):
-                lab = lab.reindex(names)
-                dummies = pd.get_dummies(lab, drop_first=True, dtype=float)
-                for c in dummies.columns:
-                    Xcols.append(dummies[c].to_numpy(dtype=float))
+        # sector dummies (drop first level to avoid collinearity with the intercept);
+        # `names` is already restricted to labelled tickers, so no NaN sneaks in.
+        if sect_labels is not None:
+            dummies = pd.get_dummies(sect_labels.reindex(names), drop_first=True, dtype=float)
+            for c in dummies.columns:
+                Xcols.append(dummies[c].to_numpy(dtype=float))
 
         X = np.column_stack(Xcols)
         yv = y.to_numpy(dtype=float)

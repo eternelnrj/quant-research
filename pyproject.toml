@@ -116,5 +116,5 @@ python_version = "3.11"
 #  types surface many false positives in this DataFrame-heavy research code, so
 #  we intentionally leave pandas untyped here.)
 [[tool.mypy.overrides]]
-module = ["pandas.*", "scipy.*", "requests.*", "matplotlib.*"]
+module = ["pandas.*", "scipy.*", "requests.*", "matplotlib.*", "networkx.*", "igraph.*", "leidenalg.*"]
 ignore_missing_imports = true

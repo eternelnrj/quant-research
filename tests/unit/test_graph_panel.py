@@ -87,3 +87,41 @@ def test_neutralize_skips_thin_cross_sections():
     f = pd.DataFrame(np.arange(10).reshape(2, 5), index=dates, columns=names, dtype=float)
     resid = neutralize_cross_section(f, by={"c": f}, min_names=10)
     assert resid.isna().to_numpy().all()                   # too thin -> left NaN
+
+
+# ---- sector neutralisation (criticism fixes) ------------------------------
+
+def test_neutralize_drops_unlabelled_sector_names():
+    # a name with a missing sector label must be dropped, NOT absorbed into the
+    # reference category (which would hand it a spurious residual).
+    names = [f"T{i:02d}" for i in range(20)]
+    sect = pd.Series(["A", "B"] * 10, index=names).astype(object)
+    sect.iloc[:3] = np.nan                                   # 3 unlabelled names
+    rng = np.random.default_rng(0)
+    feat = pd.DataFrame(rng.normal(size=(2, 20)),
+                        index=pd.bdate_range("2020-01-01", periods=2), columns=names)
+    resid = neutralize_cross_section(feat, sectors=sect, rank=True, min_names=10)
+    assert resid[names[:3]].isna().to_numpy().all()          # unlabelled -> NaN
+    assert resid[names[3:]].notna().to_numpy().all()         # labelled -> residual
+
+
+def test_neutralize_removes_a_pure_sector_effect():
+    names = [f"T{i:02d}" for i in range(18)]
+    sect = pd.Series(["A", "B", "C"] * 6, index=names)
+    level = {"A": 1.0, "B": 5.0, "C": 9.0}
+    row = [level[sect[n]] for n in names]                    # value depends only on sector
+    feat = pd.DataFrame([row] * 3, index=pd.bdate_range("2020-01-01", periods=3), columns=names)
+    resid = neutralize_cross_section(feat, sectors=sect, rank=True, min_names=10)
+    assert np.nanmax(np.abs(resid.to_numpy())) < 1e-8        # sector-demeaned to ~0
+
+
+def test_neutralize_sector_frame_missing_a_date_falls_back_to_numeric():
+    dates = pd.bdate_range("2020-01-01", periods=3)
+    names = [f"T{i:02d}" for i in range(15)]
+    rng = np.random.default_rng(1)
+    feat = pd.DataFrame(rng.normal(size=(3, 15)), index=dates, columns=names)
+    ctrl = pd.DataFrame(rng.normal(size=(3, 15)), index=dates, columns=names)
+    sect_frame = pd.DataFrame([["A", "B", "C"] * 5] * 2,      # missing the middle date
+                              index=[dates[0], dates[2]], columns=names)
+    resid = neutralize_cross_section(feat, by={"c": ctrl}, sectors=sect_frame, min_names=10)
+    assert resid.notna().any(axis=1).all()                   # every date has residuals
