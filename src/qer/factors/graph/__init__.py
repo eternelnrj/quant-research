@@ -21,6 +21,7 @@ from qer.factors.graph.base import (  # noqa: F401
 
 # Import for the registration side-effect (populates GRAPH_FACTORS).
 from qer.factors.graph import correlation_factors  # noqa: F401,E402
+from qer.factors.graph import leadlag_factors  # noqa: F401,E402
 
 __all__ = [
     "PanelFactor",
