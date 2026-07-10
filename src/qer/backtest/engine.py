@@ -30,6 +30,7 @@ class BacktestResult:
 
     returns: pd.Series          # daily gross portfolio simple return
     weights: pd.DataFrame       # date x ticker: weights HELD during each day (start-of-day)
+    trades: pd.DataFrame        # date x ticker: signed weight change at each rebalance (for costs)
     equity: pd.Series           # cumulative (1 + returns).cumprod()
     turnover: pd.Series         # per-rebalance two-sided turnover (target vs drifted weights)
     rebalance_dates: pd.DatetimeIndex   # effective (first-held) dates
@@ -91,6 +92,7 @@ class Backtest:
 
         port_ret = pd.Series(0.0, index=cal, dtype=float)
         turnover: dict[pd.Timestamp, float] = {}
+        trade_rows: dict[pd.Timestamp, pd.Series] = {}
         weight_rows: dict[pd.Timestamp, pd.Series] = {}
         current: pd.Series | None = None    # drifted weights held at the start of the day
 
@@ -101,8 +103,10 @@ class Backtest:
                     names = current.index.union(new.index)
                     prev = current.reindex(names).fillna(0.0)
                     tgt = new.reindex(names).fillna(0.0)
+                    trade_rows[d] = tgt - prev              # signed per-name trade
                     turnover[d] = float((tgt - prev).abs().sum())
                 else:
+                    trade_rows[d] = new.copy()
                     turnover[d] = float(new.abs().sum())
                 current = new.copy()
             if current is None:
@@ -119,10 +123,13 @@ class Backtest:
 
         weights = (pd.DataFrame(weight_rows).T.reindex(cal).fillna(0.0)
                    if weight_rows else pd.DataFrame(index=cal))
+        trades = (pd.DataFrame(trade_rows).T.reindex(cal).fillna(0.0)
+                  if trade_rows else pd.DataFrame(index=cal))
         equity = (1.0 + port_ret.fillna(0.0)).cumprod()
         return BacktestResult(
             returns=port_ret,
             weights=weights,
+            trades=trades,
             equity=equity,
             turnover=pd.Series(turnover, dtype=float).sort_index(),
             rebalance_dates=pd.DatetimeIndex(sorted(cal[k] for k in targets)),
