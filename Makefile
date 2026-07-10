@@ -25,6 +25,7 @@ PYTEST_ARGS ?= -q
 .PHONY: help install \
         membership ingest sectors spy data membership-refresh \
         audit factors notebooks shares fundamentals ff5 \
+        graphs-register graphs-spike graphs-text graphs-scorecard \
         test test-unit test-integration test-fast test-cov \
         lint format typecheck check \
         clean clean-data clean-cache clean-all \
@@ -51,6 +52,17 @@ help:
 	@echo "  audit           Run data-audit charts and sanity checks"
 	@echo "  factors         Compute and plot factor IC analyses"
 	@echo "  notebooks       Execute the narrative notebooks as a smoke test (needs data)"
+	@echo ""
+	@echo "Graph features (Phase 3):"
+	@echo "  graphs-register Pre-register the config grid (writes data/graphs/grid.parquet)"
+	@echo "  graphs-spike    Harness-reuse spike: a graph feature scores through the harness (needs data)"
+	@echo "  graphs-text     Ingest 10-K Item 1 text -> embeddings cache (needs network + 'text' extra)"
+	@echo "  graphs-scorecard  Score graph factors: IC, spanning alpha vs classical, deflated Sharpe (needs data)"
+	@echo ""
+	@echo "Optional data (network-gated; not in 'data'/'all'):"
+	@echo "  shares          Shares outstanding from SEC EDGAR (size factor)"
+	@echo "  fundamentals    Fundamentals from SEC EDGAR (value/quality factors)"
+	@echo "  ff5             Fama-French 5 factors (FF5 exposure regressions)"
 	@echo ""
 	@echo "Quality:"
 	@echo "  test            Run all tests"
@@ -114,10 +126,38 @@ audit:
 factors:
 	$(PYTHON) -m scripts.run_factor_zoo
 
+# ---------------------------------------------------------------------------
+# Graph features (Phase 3)
+# ---------------------------------------------------------------------------
+# Subphase 3.1: pre-register the configuration grid (the multiple-testing
+# denominator) and run the harness-reuse spike (proves a graph feature scores
+# through the Phase-2 harness unchanged). `graphs-register` is standalone;
+# `graphs-spike` needs data.
+graphs-register:
+	$(PYTHON) -m scripts.register_graph_grid
+
+graphs-spike:
+	$(PYTHON) -m scripts.run_graph_spike
+
+# Subphase 3.5: ingest 10-K Item 1 business text, embed it, and cache
+# point-in-time embeddings (data/graphs/text_embeddings.parquet). The text
+# factor registers only when this cache exists. Network-dependent (EDGAR) and
+# needs the optional `text` extra (sentence-transformers); not part of
+# `data`/`all`, and skips cleanly when the stack or the data is absent.
+graphs-text:
+	$(PYTHON) -m scripts.ingest_10k_text
+
+# Subphase 3.6: score every registered graph factor for incremental value over
+# the eight classical factors - IC, long-short Sharpe, spanning alpha (HAC t),
+# and a deflated Sharpe fed the pre-registered grid's total trial count. Writes
+# data/factors/graph_scorecard_summary.csv. Needs data (`make data`).
+graphs-scorecard:
+	$(PYTHON) -m scripts.run_graph_scorecard
+
 # Optional, network-dependent data for the data-gated factors (size,
 # value, quality). Both are scaffolds - see the scripts. Not in `data`.
 shares:
-	$(PYTHON) -m scripts.ingest_shares
+	$(PYTHON) -m scripts.fetch_shares
 
 fundamentals:
 	$(PYTHON) -m scripts.ingest_fundamentals
@@ -182,7 +222,8 @@ check: lint typecheck test-unit
 # ---------------------------------------------------------------------------
 # Three escalating levels:
 #   clean       - just Python bytecode and build artifacts (cheap, safe)
-#   clean-cache - + derived data (wide matrices). Re-derivable from raw.
+#   clean-cache - + derived data (wide matrices, 10-K embeddings). Re-derivable
+#                 from raw; keeps the graph grid + trials ledger (audit trail).
 #   clean-data  - + raw data. Will re-download from Wikipedia/yfinance.
 #   clean-all   - everything.
 
@@ -194,8 +235,13 @@ clean:
 	find . -type f -name "*.pyc" -delete
 	rm -rf build dist *.egg-info src/*.egg-info
 
+# The pre-registered grid and the append-only trials ledger
+# (data/graphs/{grid,trials}.parquet) are deliberately NOT cleaned here: they are
+# the Phase-3 multiple-testing audit trail, not a derived cache. Only the
+# re-ingestable 10-K text-embeddings cache is removed.
 clean-cache:
 	rm -rf data/processed data/wide data/audit
+	rm -f data/graphs/text_embeddings.parquet
 
 clean-data: clean-cache
 	rm -rf data/raw

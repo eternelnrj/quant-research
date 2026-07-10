@@ -1,8 +1,9 @@
 # Theory Index (Phases 0-3)
 
 An index of the mathematical, statistical, econometric, and finance-theory
-concepts and named results that underpin the code through Phase 2, plus the
-planned Phase 3 graph layer (marked as such). It is a *pointer*, not an
+concepts and named results that underpin the code through Phase 3, including the
+graph-feature layer (correlation, lead-lag, and text-similarity networks and
+their incremental-value evaluation). It is a *pointer*, not an
 explanation: each entry is something to look up to find the relevant theory.
 Canonical papers are named where one exists, since that is usually the fastest
 route to the underlying result.
@@ -87,10 +88,12 @@ approximates them) and `glossary.md` for project conventions.
 - Inverse-normal-CDF evaluation: rational approximations (e.g. Acklam) vs library quantile functions
 - Numerical stability of variance / skew computations over rolling windows
 
-## Graph-based features (Phase 3, planned)
+## Graph-based features (Phase 3, implemented)
 
-The entries below underpin the planned graph layer; the code does not yet exist,
-so they index the *plan*, not a shipped implementation.
+The entries below underpin the graph layer, which is built and tested. A few
+concepts index the *canonical* result behind a deliberate implementation
+shortcut (noted in the caveats); those describe something stronger than the code
+computes.
 
 Correlation networks and filtering
 - Sample correlation/covariance conditioning in high dimension; eigenvalue spread
@@ -140,10 +143,18 @@ describe something slightly different from what the code computes:
   rather than formal fixed-b / autocorrelation-based HAC sample-size theory.
 - HAC standard errors are the asymptotic (large-sample) object; the fixed-b
   literature describes the finite-sample reference distribution they approximate.
-- The planned Phase 3 lead-lag network indexes Granger causality as the canonical
-  result, but the implementation substitutes a numpy lagged cross-correlation with
-  a Bartlett edge test (Granger is gated on `statsmodels` becoming importable), so
-  the reference again describes something stronger than the code will compute.
+- The Phase 3 lead-lag network indexes Granger causality as the canonical result,
+  but the implementation uses a numpy lagged cross-correlation with a Bartlett edge
+  test and Benjamini-Hochberg FDR (Granger is gated on `statsmodels`, which is not
+  importable in this environment), so the reference describes something stronger
+  than the code computes.
+- The lead-lag shuffled-returns null indexes a permutation test for lead-lag, but
+  the independent circular shift tests mutual *independence* — it destroys
+  contemporaneous as well as lagged cross-dependence — so under residual
+  contemporaneous correlation plus autocorrelation it can over-reject. The code
+  reports the residual autocorrelation so the reader can judge when this matters;
+  the canonical stronger null (cross-spectrum-preserving phase randomisation) is
+  noted in the code but not implemented.
 
 The canonical references are listed regardless, since they are what you would
 read to understand what the code is approximating.

@@ -92,8 +92,9 @@ Benjamini-Hochberg and Bonferroni across the zoo; its `pvalue_from_tstat` takes
 an *explicit* reference distribution rather than guessing one (`df=None` -> the
 standard normal, which is the asymptotic reference for the Newey-West `t_nw` the
 zoo feeds it; a caller-supplied `df` -> Student-t for a single-sample mean
-(`n-1`) or a regression coefficient (`n-k`)). And `deflated_sharpe` discounts the
-best Sharpe for the number of
+(`n-1`) or a regression coefficient (`n-k`)). And `deflated_sharpe` returns the
+*probability* (the Deflated Sharpe Ratio itself) that the best Sharpe's true
+value beats a benchmark inflated for the number of
 trials, fed an *overlap-aware* effective sample size (`n / primary_horizon`,
 since the long-short returns are horizon-day forward returns sampled daily) so
 it doesn't treat ~1000 correlated observations as independent. The deflated
@@ -173,6 +174,12 @@ latter puts the project root on the path.
 
 Documented deliberately:
 
+- **Live ingests are unexercised in this environment.** SEC, Yahoo, and Ken
+  French are not reachable from the build sandbox, so the HTTP path of the
+  ingest scripts has not been run here; their parsing/transform logic is
+  unit-tested against synthetic payloads, and the fetch layer is plain stdlib
+  `urllib`. "Tested transform, unexercised network." Validate against a few known
+  filings before trusting research output.
 - **Multi-class shares undercount market cap.** The cover-page shares figure for
   names like GOOGL/GOOG or BRK-A/BRK-B captures a single class, so `market_cap`
   (and the `size` factor) is wrong for those names until per-class aggregation is
@@ -195,21 +202,38 @@ Documented deliberately:
   survivorship-free panel. It is benign — those windows are correctly NaN — and
   is also a faint data-quality signal of empty columns.
 
-## Phase 3: graph features (planned)
+Several rough edges noted in earlier versions of this file are now resolved: the
+`build_membership_table` validation crash, the `_validate`/`validate` naming
+mismatch, the out-of-sync `test_loader`/`test_membership` suites, the double-log
+in the IC convenience path, the deflated Sharpe's overlap-optimism (now uses
+`n / primary_horizon`), `pvalue_from_tstat`'s baked-in degrees of freedom (it now
+takes an *explicit* reference - normal for the HAC `t_nw`, Student-t with a
+caller-supplied `df` otherwise - rather than the original blanket normal or the
+interim hardcoded `n-1`, which was only right for a single-sample mean), and
+`market_return`'s silent fallback to
+raw close (now raises if the adjusted series is absent).
 
-The notes below describe *design intent*, not shipped code — the graph layer is
-the next phase. They are recorded here so the structural decisions are settled
-before implementation. The governing constraint is that nothing about graph
-features gets its own evaluation path.
+## Phase 3: graph features (implemented)
 
-**A graph feature is a `Factor`.** Each relational signal — a centrality, a
-community label, a lead-lag in/out-degree, a text-neighbour return — produces the
-same `date x ticker` panel of node-level numbers as a classical factor,
-subclasses the existing `Factor` ABC, registers, and is judged by the Phase 2
-harness untouched. The first task of the phase is a *harness-reuse spike*: push an
-existing classical factor (e.g. momentum) through the whole graph evaluation path
-with neutralisation off and assert it reproduces the Phase 2 IC/Sharpe numbers —
-proving "a graph feature is a Factor" before any graph is built.
+The graph layer is built and tested (subphases 3.1-3.6). The notes below record
+the structural decisions and the seams that survived contact with the code. The
+governing constraint held: nothing about graph features gets its own evaluation
+path.
+
+**A graph feature is a `Factor` — in a separate registry.** Each relational
+signal — a centrality, a community cohesion, a lead-lag in/out-degree, a
+text-neighbour return — produces the same `date x ticker` panel of node-level
+numbers as a classical factor, implements the existing `Factor` interface, and is
+judged by the Phase 2 harness untouched. The one deviation from the original plan:
+graph factors register into a *separate* `GRAPH_FACTORS` dict, not the classical
+`FACTORS`. Mixing them would have contaminated the classical multiple-testing
+denominator (the deflated-Sharpe/BH count) and broken `test_all_factors_produce_finite_ic`,
+which iterates the classical registry; keeping them apart also matches the
+pre-registered grid's own trial count. The harness evaluates a factor *by object*,
+so the split costs nothing. The phase opened with a *harness-reuse spike*
+(`graphs/spike.py`): an existing classical factor's stored panel, wrapped in a
+trivial `PanelFactor`, reproduces the native IC/Sharpe to machine precision —
+proving "a graph feature is a `Factor`" before any graph was built.
 
 **The one structural difference: a per-rebalance loop, not a single vectorised
 pass.** A centrality or community label is a property of a graph built from a
@@ -233,20 +257,27 @@ place. A new graph feature is a pure function from a window to a per-name `Serie
 and inherits look-ahead-safety, survivorship discipline, and exposure control from
 the engine.
 
-**Construction choices that matter** (recorded so they aren't relitigated).
-Correlations are Ledoit-Wolf-shrunk before anything else — the cheapest defence
-against high-dimensional instability — and the window starts at 120 days, not 60.
-At least two sparsifiers are kept so a result isn't a one-method artefact: a hard
-threshold on `|rho|` and a minimum spanning tree on the Mantegna distance
-`d = sqrt(2(1-rho))` (PMFG optional). Two subtleties bite. Eigenvector centrality
-assumes non-negative weights (Perron-Frobenius), but correlations are signed, so
-it is computed on the MST *topology* (or on `|rho|`), never on the distance
-weights the tree was built from — distance weights would rank the most
-*dissimilar* nodes as most central and invert the ordering. And Louvain/Leiden
-community labels are stochastic, arbitrary integers, so any cross-snapshot
-"delta-community" feature must first align labels across consecutive snapshots
-(greedy Jaccard / Hungarian matching on membership overlap), or most of the
-apparent migration is relabelling noise.
+**Construction choices that matter** (as built). Correlations are Ledoit-Wolf-shrunk
+before anything else — the cheapest defence against high-dimensional instability,
+and the numpy estimator is verified to match `scikit-learn` — and the window
+starts at 120 days, not 60. Two sparsifiers are kept so a result isn't a
+one-method artefact: a hard threshold on `|rho|` and a minimum spanning tree on
+the Mantegna distance `d = sqrt(2(1-rho))` (PMFG left as an optional, unimplemented
+hook). Three subtleties bit during implementation. (1) Eigenvector centrality
+assumes non-negative weights (Perron-Frobenius), so it is computed on the
+`|rho|`-weighted adjacency, never on the distance weights the tree was built from
+(which would rank the most *dissimilar* nodes as most central); the code *raises*
+on a negative adjacency rather than returning a silently-inverted ranking. (2) The
+MST adjacency is `|rho|`-weighted but *epsilon-floored*, and `shrunk_correlation`
+drops zero-variance columns first — without both, a halted (zero-variance) name
+produces a `rho ≡ 0` node whose MST edge has weight 0 and gets dropped by an
+"adjacency > 0 means edge" convention, silently disconnecting the backbone. (3)
+Louvain/Leiden community labels are stochastic, arbitrary integers, so any
+cross-snapshot "delta-community" feature first aligns labels across snapshots
+(Hungarian assignment on the membership-overlap matrix), or most apparent
+migration is relabelling noise. Betweenness (distance `1/|rho|`) and communities
+run on `networkx` behind the `graphs` extra; the numpy centralities are always
+available, and the optional-dep factors register only when the extra is importable.
 
 **Controlled before believed.** A relational feature is presumed to be a
 size/liquidity/sector exposure until neutralisation says otherwise, and presumed
@@ -279,20 +310,29 @@ features, which aggregates many alphas rather than re-examining one.
 **Honest seams named up front.** Lead-lag effects are weak and decay fast in
 liquid large-caps — this class is the *expected* failure/decay case the done-when
 criterion requires, and the FDR-vs-shuffled-null comparison is built so that "no
-real edge structure here" is a presentable finding rather than a dead end. Granger
-causality stays off the critical path because `statsmodels` is declared but not
-importable in this environment, so the lead-lag engine is a numpy lagged
-cross-correlation with a Bartlett edge test (per-(pair, lag) standard error
-`~ 1/sqrt(T)`, valid when the residual series are approximately white) and BH FDR;
-Granger is gated behind adding `statsmodels` as a genuine dependency. Text
-ingestion is the largest new lift and the biggest data-quality unknown: a per-year
-coverage report (parseable Item 1 fraction, embedding-success rate, sanity of a
-few firms' nearest neighbours) is a gate that must appear on the scorecard before
-any text signal is trusted, and `sentence-transformers`/`torch` live behind an
-optional `text` extra so the factor skips rather than crashes when the stack is
-absent. The single largest risk is self-deception via the trial count: the grid
+real edge structure here" is a presentable finding rather than a dead end. One
+honesty caveat is documented in the code: the null circularly shifts each residual
+series independently, which destroys *all* cross-sectional dependence, so a small
+p-value strictly rejects mutual *independence* — genuine directional lead-lag only
+if the residuals carry no other cross-sectional dependence. Residual
+contemporaneous correlation plus autocorrelation can manufacture spurious *lagged*
+cross-correlations the null can't reproduce; this is empirically negligible at the
+autocorrelation typical of daily large-cap residuals and material only at high
+autocorrelation, so `leadlag_density_report` reports `mean_abs_autocorr` for the
+caller to judge trustworthiness. Granger causality stays off the critical path
+because `statsmodels` is declared but not importable in this environment, so the
+lead-lag engine is a numpy lagged cross-correlation with a Bartlett edge test
+(per-`(pair, lag)` standard error `~ 1/sqrt(T)`, valid when the residual series are
+approximately white) and BH FDR over all `(i, j, lag)`; the optional Granger helper
+is robust across `statsmodels` versions. Text ingestion is the largest new lift
+and the biggest data-quality unknown: a coverage report (parseable Item 1 fraction,
+embedding-success rate, point-in-time nearest-neighbour sanity) is a gate on the
+scorecard, `sentence-transformers`/`torch` live behind an optional `text` extra,
+and the text factor registers only when an embedding cache exists — it skips rather
+than crashes when the stack or the data is absent. The single largest risk is
+self-deception via the trial count: the pre-registered grid
 (windows x sparsifiers x centralities x communities x lead-lag lags x kNN) is
-easily hundreds of features, so it is pre-registered before forward returns are
-looked at, every configuration is logged to a trials ledger
-(`data/graphs/trials.parquet`) pass or fail, and the deflated Sharpe and the BH
-step are fed the *total* grid size, not the count of reported winners.
+hundreds of features, so it is frozen before forward returns are looked at, every
+configuration is logged to a trials ledger (`data/graphs/trials.parquet`), and the
+deflated Sharpe and the BH step are fed the *total* grid size, not the count of
+reported winners.

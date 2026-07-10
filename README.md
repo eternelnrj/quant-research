@@ -1,18 +1,20 @@
 # Quant Equity Research — Cross-Sectional Long-Short with Graph Features
 
 A systematic US large-cap long-short equity research project that pairs classical
-cross-sectional alpha factors with a planned layer of graph-based features derived
+cross-sectional alpha factors with a layer of graph-based features derived
 from correlation, lead-lag, and text-similarity networks between stocks.
 
 This repository contains the data pipeline, factor library, evaluation harness,
 robustness diagnostics, and (in later phases) backtesting, portfolio
 construction, and a full written report.
 
-> **Status.** Phases 0-2 — the point-in-time universe, the data pipeline, the
-> eight classical factors, and the evaluation harness — are implemented and
-> tested. **The graph features (Phase 3) and everything after are planned, not yet
-> built**; the sections below marked *planned* describe design intent. See the
-> roadmap for what exists today versus what is on the way.
+> **Status.** Phases 0-3 — the point-in-time universe, the data pipeline, the
+> eight classical factors, the evaluation harness, and the full graph-feature
+> layer (correlation, lead-lag, and text-similarity networks with their
+> incremental-value scorecard) — are implemented and tested. **Phases 4 and
+> after are planned, not yet built**; the sections below marked *planned*
+> describe design intent. See the roadmap for what exists today versus what is
+> on the way.
 
 ## Motivation
 
@@ -31,7 +33,7 @@ background in discrete geometry and graph theory.
 
 ## What is built today
 
-Phases 0-2 are implemented and tested; Phases 3-7 are planned (see below).
+Phases 0-3 are implemented and tested; Phases 4-7 are planned (see below).
 
 **Universe and data (Phases 0-1).** US large-cap equities (S&P 500),
 point-in-time historical membership reconstructed from Wikipedia's current
@@ -46,16 +48,16 @@ stored as parquet behind a single lazy, cached `DataLoader`.
 behind a common `Factor` interface, each computed as a vectorised, look-ahead-safe
 `date x ticker` panel:
 
-| Factor               | Direction | Needs                 |
-| -------------------- | --------- | --------------------- |
-| `momentum_12_1`      | +1        | prices                |
-| `reversal_1m`        | -1        | prices                |
-| `volatility_60d`     | -1        | prices                |
-| `amihud_illiquidity` | +1        | prices + volume       |
-| `idio_skew_60d`      | -1        | prices + market       |
-| `size`               | -1        | prices + shares       |
-| `value_btm`          | +1        | prices + fundamentals |
-| `quality_gp`         | +1        | fundamentals          |
+| Factor              | Direction | Needs                |
+| ------------------- | --------- | -------------------- |
+| `momentum_12_1`     | +1        | prices               |
+| `reversal_1m`       | -1        | prices               |
+| `volatility_60d`    | -1        | prices               |
+| `amihud_illiquidity`| +1        | prices + volume      |
+| `idio_skew_60d`     | -1        | prices + market      |
+| `size`              | -1        | prices + shares      |
+| `value_btm`         | +1        | prices + fundamentals|
+| `quality_gp`        | +1        | fundamentals         |
 
 They are judged by one shared harness: multi-horizon information coefficient
 (1/5/21-day), Newey-West (overlap-aware) IC t-statistics, decile long-short
@@ -63,24 +65,43 @@ Sharpe, Benjamini-Hochberg / Bonferroni multiple-testing correction, a deflated
 Sharpe across the whole factor zoo, and Fama-French 5 exposures. The full table
 is produced by `make factors`.
 
-## Planned methodology (Phases 3-7)
-
 **Graph features (Phase 3).** Three families of *relational* signals, each a
-`Factor` evaluated through the Phase 2 harness untouched: correlation-network
-centralities and communities (Ledoit-Wolf-shrunk correlations sparsified to a
-minimum spanning tree on the Mantegna distance, plus a hard-threshold graph);
-lead-lag directed graphs from market-residualised cross-correlations with a
-Bartlett edge test and Benjamini-Hochberg FDR control against a shuffled-returns
-null; and text-similarity k-NN graphs on sentence-transformer embeddings of 10-K
-*Business* (Item 1) descriptions. A shared point-in-time engine (`graphs/windows.py`,
-`graphs/panel.py`) builds each graph monthly from a trailing window over the
-point-in-time universe and forward-fills node features to the daily panel, so
-look-ahead, survivorship, and exposure-control are enforced once. Every feature
-is cross-sectionally neutralised against size, illiquidity, and sector *before*
-testing, charged turnover on both legs, regressed for FF5-adjusted alpha and for
-unspanned alpha against the full eight-factor classical set (a Gibbons-Ross-Shanken
-spanning test), and discounted by a deflated Sharpe fed the total
-configuration-grid trial count. 
+`Factor` evaluated through the Phase 2 harness untouched and registered in a
+*separate* `GRAPH_FACTORS` registry so they never enlarge the classical factor
+zoo or its multiple-testing denominator:
+
+- **Correlation networks** — Ledoit-Wolf-shrunk correlations (a numpy estimator
+  verified to match `scikit-learn`) sparsified to a minimum spanning tree on the
+  Mantegna distance (`|rho|`-weighted, `epsilon`-floored so a zero-variance name
+  can't disconnect the backbone) and a hard-threshold graph, with degree /
+  eigenvector / clustering / betweenness centralities, Louvain/Leiden communities
+  and cohesion, Hungarian label alignment, and delta-centrality variants.
+- **Lead-lag networks** — market-residualised lagged cross-correlations with a
+  Bartlett edge test and Benjamini-Hochberg FDR over all `(i, j, lag)` pairs,
+  giving directed in/out-degree (followers/leaders) and an upstream signal, plus
+  a circular-shuffle honest-null density report (an independence test, with the
+  residual autocorrelation reported so its reach is auditable).
+- **Text-similarity networks** — a cosine k-NN graph over sentence-transformer
+  embeddings of 10-K *Business* (Item 1) text, giving a neighbour-return signal,
+  point-in-time via an embedding store (skips cleanly without the `text` extra).
+
+A shared point-in-time engine (`graphs/windows.py`, `graphs/panel.py`) builds each
+graph monthly from a trailing window over the point-in-time universe and
+forward-fills node features to the daily panel, so look-ahead, survivorship, and
+exposure-control are enforced once. Every feature is cross-sectionally neutralised
+in rank space against size, illiquidity, and sector *before* testing, and the
+scorecard (`diagnostics/incremental.py`, `diagnostics/graph_scorecard.py`) reports
+unspanned alpha against the full eight-factor classical set (HAC t-stat;
+single-asset Gibbons-Ross-Shanken `= t^2`; the appraisal-ratio tangency identity
+`theta_new = theta_F + IR^2`), a block-bootstrap alpha interval, the
+cluster-vs-sector confusion matrix, and a deflated Sharpe fed the *total*
+configuration-grid trial count. The core is numpy/scipy; betweenness/communities
+use `networkx` behind the `graphs` extra, and Granger causality is gated on
+`statsmodels`. Lead-lag is the honest failure/decay candidate the done-when
+criterion calls for — weak in liquid large-caps, and reported as such rather than
+fished into spurious edges.
+
+## Planned methodology (Phases 4-7)
 
 **Backtesting (Phase 4).** Vectorised walk-forward backtester with strict
 IS/OOS separation, T+1 execution, linear-plus-impact transaction costs, explicit
@@ -110,12 +131,12 @@ quant-equity-research/
 │   ├── data/                 # loader, fundamentals loader, EDGAR client
 │   ├── universe/             # S&P 500 membership reconstruction
 │   ├── factors/              # Factor ABC + registry + 8 factors
-│   │   #   graph/            — Phase 3: thin Factor subclasses per graph feature
+│   │   #   graph/            — Phase 3: graph Factors + separate GRAPH_FACTORS registry
 │   ├── diagnostics/          # IC, portfolios, exposures, multiple testing,
 │   │                         #   deflated Sharpe, factor zoo, data audit
 │   │   #   incremental.py graph_scorecard.py  — Phase 3: spanning test + scorecards
-│   └── graphs/               # Phase 3: windows, correlation, centrality, leadlag,
-│                             #   textsim, panel (point-in-time graph engine)
+│   └── graphs/               # Phase 3 engine: windows, panel, correlation, centrality,
+│                             #   leadlag, textsim, grid, trials, spike
 ├── scripts/                  # thin CLI entry points (ingest + run)
 │   #   ingest_10k_text.py    — Phase 3: EDGAR 10-K Item 1 text, point-in-time
 ├── tests/                    # unit + integration pytest suites
@@ -152,7 +173,7 @@ export QER_SEC_USER_AGENT="Your Name your@email.com"
 
 ## Status
 
-Phases 0-2 complete and tested; Phases 3-7 planned. See `docs/design_notes.md`
+Phases 0-3 complete and tested; Phases 4-7 planned. See `docs/design_notes.md`
 for the structural rationale and the honest seams in the current build, and
 `docs/glossary.md` for conventions.
 

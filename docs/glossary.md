@@ -228,11 +228,16 @@ errors would overstate significance.
 
 ### Deflated Sharpe ratio
 
-A Sharpe ratio adjusted downward for the number of strategy variants tried,
-
-guarding against the multiple-testing illusion of finding "the" good backtest
-
-among many.
+A *probability*, despite the name. Under the null that the tested strategies are
+skill-less, the best of N is expected to reach a benchmark Sharpe `sr0` (the
+expected maximum) by luck; the DSR estimates the probability that a Sharpe drawn
+under that null would *not* exceed the observed one - equivalently, by the
+test/confidence duality, the confidence that the strategy's true Sharpe clears
+`sr0` - given the sample length and the returns' skew/kurtosis. Near 1, the
+observed Sharpe is unlikely to be a multiple-testing artefact; near 0.5 or below,
+it probably is. (Bailey & Lopez de Prado 2014; the Probabilistic Sharpe Ratio
+evaluated at the trial-adjusted benchmark `sr0` rather than at zero.) The function
+returns a number in [0, 1], not a discounted Sharpe value.
 
 ### Graph features
 
@@ -241,6 +246,17 @@ The project's differentiator: relational signals between stocks rather than
 asset-level ones — correlation-network centralities, lead-lag directed graphs,
 
 and text-similarity networks from 10-K business descriptions.
+
+### GRAPH_FACTORS registry
+
+A registry for graph factors kept *separate* from the classical `FACTORS` dict.
+Graph factors are evaluated by the same harness (by object), but keeping them out
+of the classical registry stops them contaminating the classical multiple-testing
+denominator (the deflated-Sharpe / BH count) and matches the pre-registered grid's
+own trial count. Optional-dependency factors (betweenness, communities) register
+only when their extra is importable; the text factor only when an embedding cache
+exists — so the registry never holds a factor that would crash in the current
+environment.
 
 ### Centrality
 
@@ -294,8 +310,18 @@ topology or on `|rho|`, never on distance weights — which would invert the ord
 ### Betweenness centrality
 
 How often a node lies on shortest paths between other nodes — a measure of being a
-bridge between otherwise separate clusters. Exact computation is O(n^3); the plan
-operates on the MST / largest component and uses `igraph` or an approximation.
+bridge between otherwise separate clusters. Shortest paths use *distance* weights
+`1/|rho|` (a strong link is a short hop), the mirror of the similarity weights
+degree and eigenvector centrality use; mixing the two would invert the ranking.
+Computed via `networkx` (the optional `graphs` extra), so the corresponding
+factors register only when it is importable.
+
+### Community cohesion
+
+The share of a node's edge weight that stays inside its own detected community —
+high when a stock's comovement is concentrated in a tight cluster, low when it
+bridges clusters. A rankable, sign-meaningful community feature (a raw integer
+community label is not directly rankable).
 
 ### Community detection
 
@@ -311,12 +337,26 @@ consecutive snapshots (greedy Jaccard / Hungarian on membership overlap). Requir
 before any "did this stock change community" feature, or relabelling noise
 masquerades as real migration.
 
+### Delta-centrality
+
+The snapshot-to-snapshot *change* in any node statistic (degree, eigenvector,
+cohesion), computed on the monthly rebalance grid and forward-filled. Higher
+turnover but often more predictive than the level — a stock *becoming* more
+central rather than merely *being* central.
+
 ### Lead-lag network
 
 A *directed* graph with an edge i -> j when stock i's market-residualised returns
-lead j's at lags of 1-5 days. Edges are tested with a Bartlett standard error,
-FDR-controlled, and compared to a shuffled-returns null; in-degree and out-degree
+lead j's at lags of 1-5 days. Edges are tested with a Bartlett standard error and
+Benjamini-Hochberg FDR over all `(i, j, lag)` hypotheses (an edge survives if any
+lag does), signed at the strongest surviving lag; in-degree and out-degree
 (followers and leaders) become separate factors.
+
+### Upstream signal
+
+For each follower, the edge-weighted mean of its leaders' recent residual returns
+— the genuinely *predictive* lead-lag feature: if your leaders just moved, you are
+expected to move in the (sign-weighted) same direction.
 
 ### Bartlett edge test
 
@@ -328,10 +368,14 @@ environment.
 
 ### Shuffled-returns null
 
-A baseline built by circularly shuffling the return series to destroy genuine
-lead-lag structure while preserving marginal properties. Surviving edge density is
-reported against this null so that "no real edge structure" is a defensible finding
-rather than a dead end.
+A baseline built by circularly shifting each residual series independently,
+destroying cross-series dependence while preserving each series' own
+autocorrelation and marginal. Surviving edge density is reported against this null
+so that "no real edge structure" is a defensible finding rather than a dead end.
+Because the independent shift destroys *contemporaneous* as well as lagged
+dependence, it is strictly a test against mutual independence; the density report
+also returns the mean residual autocorrelation, the quantity that governs when
+contemporaneous-correlation-plus-autocorrelation could inflate the result.
 
 ### Text-similarity network (TNIC)
 
@@ -344,6 +388,18 @@ cosine k-nearest-neighbour graph over sentence-transformer embeddings.
 The average recent return of a firm's text-graph neighbours — an
 industry-momentum-style predictor that uses the text-similarity network in place of
 a sector label.
+
+### Point-in-time embedding store
+
+The structure that answers "what did firm X's 10-K look like *as of* date t" by
+returning the embedding of its most recent filing on or before t. Keeps the text
+graph point-in-time — a graph on date t uses only filings known by t.
+
+### Coverage report
+
+The text-graph data-quality gate: per checkpoint, the fraction of the universe with
+an available (point-in-time) embedding. A graph on 60% coverage is a different,
+biased object than one on 95%, so the fraction is a first-class scorecard output.
 
 ### Cross-sectional neutralisation
 
@@ -367,6 +423,21 @@ The standard test of whether adding one or more assets improves the mean-varianc
 frontier. For a *single* test asset it reduces to the squared t-stat of the
 spanning-regression intercept, which is why that intercept t *is* the spanning
 statistic; genuine extra power comes only from a joint test across many assets.
+
+### Appraisal ratio (and tangency identity)
+
+`IR = alpha / sd(eps)` from the spanning regression — the per-unit-idiosyncratic-risk
+reward of the unspanned alpha. Adding the factor lifts the benchmark set's maximum
+squared Sharpe by exactly `IR^2` (`theta_new = theta_benchmark + IR^2`), an exact
+identity the scorecard checks and the same quantity the GRS t-stat measures.
+
+### Block bootstrap
+
+A resampling scheme that draws contiguous blocks of the joint (factor, benchmarks)
+series — here a circular moving-block bootstrap — to preserve the short-range
+dependence of overlapping returns. Used for a nonparametric confidence interval on
+the unspanned alpha, a robustness check against the fat tails and autocorrelation of
+one daily series (not an independent test or a power gain).
 
 ### Trials ledger
 
