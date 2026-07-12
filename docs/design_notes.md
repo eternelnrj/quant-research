@@ -336,3 +336,103 @@ hundreds of features, so it is frozen before forward returns are looked at, ever
 configuration is logged to a trials ledger (`data/graphs/trials.parquet`), and the
 deflated Sharpe and the BH step are fed the *total* grid size, not the count of
 reported winners.
+
+## Phase 4: backtesting (implemented)
+
+The backtesting engine is built and tested (subphases 4.1-4.5). It turns any
+`Factor` — classical or graph — into an honest net-of-cost return series and a
+standardised report, in five layers under one package (`backtest/`). The
+governing constraint this time: every number a reviewer sees must be causal,
+net of a documented cost model, and reproducible from one command.
+
+**The engine is causal by construction, and the return accounting is
+NAV-relative.** A signal known at close(*t*) is traded at close(*t + exec_lag*)
+and held to the next rebalance, drifting with prices in between — never traded at
+the close it was computed from. Two tests pin the timing: a *no-look-ahead
+property test* (perturbing the signal strictly after date *t* leaves every return
+up to *t* bit-identical) and a *clairvoyant cheat* (feeding tomorrow's return as
+the signal, `exec_lag = 0` is profitable and `exec_lag = 1` is not). The subtle
+part is the drift accounting. Holding a book between rebalances, each daily return
+must be measured on the *current* book value, not the capital deployed at the last
+rebalance: the weights are renormalised by the portfolio's own growth factor each
+day (`w_i <- w_i (1 + r_i) / (1 + r_p)`). Without that divisor the compounded
+equity double-counts within-period growth — a real bug caught in review, where a
+fixed long-short book drifted to 1.1533 against an exact buy-and-hold NAV of
+1.1507. With it, the engine reproduces the analytic buy-and-hold book to machine
+precision (`8.9e-16`), and a regression test locks the identity in. Walk-forward
+IS/OOS splits and folds are first-class, and the engine exposes per-name trades so
+the cost layer can charge them.
+
+**Costs are both-legged, convex, and shorts are not free.** The linear spread is
+charged on two-sided turnover (`sum |dw|`, so entries and exits both pay); market
+impact is a *per-name convex* term — each trade pays `coef * sqrt(participation)`
+of its own notional, so the total drag scales as `size^{3/2}` and dominates the
+linear spread at scale (the square-root law, not a linear fee on everything).
+Shorts accrue a daily borrow carry on the short leg only, and a hard-to-borrow
+proxy (small-cap *and* illiquid) is excluded from the short book — a long-only
+book pays no borrow, by construction and by test. Capacity is *reported, not
+optimised*: each position is expressed as a fraction of its 21-day ADV, worst
+names first. One honest modelling choice: impact and capacity use a *fixed
+nominal* AUM (the "at \$X AUM" view), while the linear and borrow costs are
+NAV-relative fractions consistent with the return series — documented so the two
+lenses aren't confused. Two review bugs lived here: `exclude_htb_shorts` crashed
+on a realistically *misaligned* hard-to-borrow mask (an object-dtype boolean after
+reindex), and it now casts to `bool` and is tested against a mask missing names,
+dates, and carrying extras.
+
+**Constraints are a single-pass rules-based projection, deliberately.** Sizing
+(equal / signal / inverse-volatility, the last weighting a side by `1/vol` so
+lower-vol names carry more) feeds a fixed-order pipeline: cap positions,
+dollar-neutralise, sector-neutralise, beta-neutralise (a projection that zeroes
+`sum w_i beta_i`), renormalise to unit gross. Each constraint provably enforces
+*its own* limit in isolation, and the pipeline is idempotent on an already-feasible
+book — but because the neutralisations partly undo one another and the final
+renormalise can lift a capped weight back over its cap, the constraints hold
+*jointly* only approximately. That is the deliberate Phase 4/Phase 5 seam: the
+rules-based version keeps Phase 4 solver-free and standalone, and the exact joint
+projection is Phase 5's `cvxpy` objective, which drops into the same weigher slot
+the engine already exposes. The tests therefore check each constraint on its own,
+not simultaneous satisfaction. The composed weigher caches its rolling vol/beta
+panels once per loader — the obvious `dict.setdefault(k, expensive())` was a
+review bug (the default argument is evaluated every call, so the panel was rebuilt
+on every rebalance), now an explicit `if k not in cache` with a loader-id guard
+that also closes a stale-cache correctness hole for a weigher reused across
+loaders.
+
+**Analytics reuse the Phase 2 machinery rather than reimplement it.** The metric
+set (CAGR, annualised vol, Sharpe, Sortino with target semideviation, max
+drawdown, Calmar, conditional drawdown, hit rate, profit factor, turnover) is a
+set of closed-form-tested pure functions; risk attribution reuses the Phase 2 HAC
+FF5 regression and the deflated Sharpe. `benchmark_stats` answers "beats what?"
+against SPY buy-and-hold — and aligns the benchmark to the *strategy's* date range
+before measuring, a review fix without which a full-history SPY was being compared
+to a shorter OOS strategy window. The Sharpe-vs-cost curve is the centrepiece
+defence chart: net Sharpe as the assumed round-trip spread rises from 0 to 25 bps.
+
+**The report is deterministic and the pitfalls are tests.** `make backtest
+FACTOR=<name>` (or `backtest-all`) runs the whole pipeline and writes a
+self-contained HTML report (embedded charts) or a matplotlib PDF, with a required
+one-line honesty header — turnover and assumed round-trip cost — at the top. The
+scalar metrics table is deterministic, so two runs of the same config are
+diff-identical, and that is itself a test. The report's cost curve is built over
+the *same* evaluation period as the headline and with the same cost model, so the
+curve at the assumed spread equals the headline net Sharpe (a review fix: it had
+been a full-sample, spread-only curve sitting next to an OOS, full-cost headline).
+The six roadmap pitfalls are locked in as a regression suite — one assertion each
+for T+1 execution, convex impact with a capacity report, borrow-charged and
+HTB-excluded shorts, disjoint IS/OOS with an OOS headline, day-end-only prices (two
+books with identical closes but different intraday highs/lows produce identical
+returns, proving no stop-loss look-ahead), and reported capacity — so every
+defence built across 4.1-4.4 has a permanent guard.
+
+**Honest seams named up front.** The single-pass constraints satisfy limits
+jointly only approximately (above); impact and capacity assume a fixed nominal AUM
+(above). Two smaller deviations from the plan: the report is *HTML-primary* (a
+self-contained file with embedded charts, plus a matplotlib PDF) rather than the
+pdflatex pipeline the theory docs use — more portable and testable offline, at the
+cost of not matching the report's typography; and the `backtest` targets are
+*on-demand and factor-specific*, so they are not wired into `make all` (which
+would need to pick a default factor and run a full backtest on every clone),
+matching how the graph scorecard is kept off the default chain. The `universe_size`
+field in the report header is really "names ever traded", a proxy rather than the
+tradable-universe count.

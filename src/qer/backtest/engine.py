@@ -54,11 +54,12 @@ class Backtest:
     """Vectorised, walk-forward, T+1 long-short executor (Phase 4.1)."""
 
     def __init__(self, *, freq: str = "M", scheme: str = "equal", n_buckets: int = 10,
-                 exec_lag: int = 1):
+                 exec_lag: int = 1, weigher=None):
         self.freq = freq
         self.scheme = scheme
         self.n_buckets = n_buckets
         self.exec_lag = int(exec_lag)
+        self.weigher = weigher      # optional (row, as_of, loader) -> weights (Phase 4.3)
 
     def run(self, loader, factor, *, start=None, end=None) -> BacktestResult:
         cal = pd.DatetimeIndex(loader.close.index).drop_duplicates().sort_values()
@@ -86,7 +87,10 @@ class Backtest:
             universe = set(loader.get_universe(t))
             row = signal.loc[t]
             row = row[[c for c in row.index if c in universe]]
-            w = signal_to_weights(row, scheme=self.scheme, n_buckets=self.n_buckets)
+            if self.weigher is not None:
+                w = pd.Series(self.weigher(row, t, loader), dtype=float)   # Phase 4.3: size -> constrain
+            else:
+                w = signal_to_weights(row, scheme=self.scheme, n_buckets=self.n_buckets)
             if len(w) and float(w.abs().sum()) > 0:
                 targets[eff] = w
 
@@ -134,3 +138,12 @@ class Backtest:
             turnover=pd.Series(turnover, dtype=float).sort_index(),
             rebalance_dates=pd.DatetimeIndex(sorted(cal[k] for k in targets)),
         )
+
+
+def holding_period_sweep(loader, factor, holding_periods=(1, 5, 21), **backtest_kwargs):
+    """Run the engine at several rebalance/holding periods (in trading days) and
+    return ``{holding_period: BacktestResult}`` for comparison (Phase 4.3)."""
+    return {
+        hp: Backtest(freq=int(hp), **backtest_kwargs).run(loader, factor)
+        for hp in holding_periods
+    }

@@ -1,9 +1,10 @@
-# Theory Index (Phases 0-3)
+# Theory Index (Phases 0-4)
 
 An index of the mathematical, statistical, econometric, and finance-theory
-concepts and named results that underpin the code through Phase 3, including the
+concepts and named results that underpin the code through Phase 4, including the
 graph-feature layer (correlation, lead-lag, and text-similarity networks and
-their incremental-value evaluation). It is a *pointer*, not an
+their incremental-value evaluation) and the causal, cost-aware backtesting
+engine. It is a *pointer*, not an
 explanation: each entry is something to look up to find the relevant theory.
 Canonical papers are named where one exists, since that is usually the fastest
 route to the underlying result.
@@ -130,6 +131,39 @@ Incremental value and spanning
 - Block bootstrap for HAC-robust inference on one fat-tailed daily series (Kunsch 1989)
 - Cross-sectional neutralisation as partialling-out (Frisch-Waugh-Lovell, above) of characteristics
 
+## Backtesting and portfolio evaluation (Phase 4, implemented)
+
+The entries below underpin the backtesting engine, which is built and tested. As
+with the graph layer, a few index the *canonical* result behind a deliberate
+implementation shortcut (noted in the caveats).
+
+Execution and causality
+- Walk-forward evaluation; in-sample / out-of-sample separation; expanding vs rolling windows
+- Execution lag and T+1 fill; look-ahead bias in signal-to-trade timing
+- Buy-and-hold weight drift between rebalances; NAV-relative return accounting (return on current book value, not initial capital)
+- Constant-mix vs buy-and-hold portfolio dynamics; self-financing long-short book
+
+Transaction costs and market microstructure
+- Bid-ask spread / commission as a linear function of turnover; two-sided (both-leg) turnover
+- Market impact and the square-root law; participation rate (trade size / ADV); Almgren-Chriss optimal execution (2000); convexity of total impact (`~ size^{3/2}`)
+- Average daily volume (ADV); capacity as a fraction of ADV; liquidation horizon
+- Short-sale mechanics: stock borrow / rebate rate; hard-to-borrow names; short-borrow carry as a daily accrual
+
+Position sizing and constraints
+- Equal-weight, signal-proportional, and inverse-volatility (risk-parity-lite) sizing; risk contribution
+- Dollar-neutral, unit-gross book; gross vs net exposure
+- Position caps; sector neutralisation; market-beta neutralisation as a projection (`w' = w - (w·b / b·b) b`)
+- Deterministic projection (clip / demean / renormalise) vs joint convex optimisation (deferred to Phase 5)
+
+Performance and risk metrics
+- Compound annual growth rate (CAGR); annualisation by `sqrt(periods)`
+- Sharpe ratio (per-observation and annualised); Sortino ratio and target semideviation (downside deviation)
+- Maximum drawdown; Calmar ratio (CAGR / |maxDD|); Conditional Drawdown at Risk (CDaR) as drawdown expected shortfall
+- Hit rate; profit factor; average turnover
+- Realised single-index beta; Fama-French 5-factor attribution with HAC t-stats (reused from Phase 2)
+- Deflated Sharpe ratio applied to the backtest (Bailey & Lopez de Prado 2014; also in Phase 2)
+- Cost-sensitivity analysis: net Sharpe as a function of the assumed round-trip cost
+
 ## Caveats
 
 A few entries name the *correct* theory behind a design choice or a fix even
@@ -155,6 +189,22 @@ describe something slightly different from what the code computes:
   reports the residual autocorrelation so the reader can judge when this matters;
   the canonical stronger null (cross-spectrum-preserving phase randomisation) is
   noted in the code but not implemented.
+
+- The Phase 4 constraint pipeline indexes sector/beta neutralisation and position
+  caps as the canonical projections, but applies them in a single deterministic
+  pass, so the neutralisations partly undo one another and the constraints hold
+  jointly only approximately (each holds exactly in isolation). The reference
+  describes the joint feasible set that a convex projection would enforce exactly —
+  which is Phase 5's `cvxpy` step, not the Phase 4 rules-based version.
+- The square-root impact model indexes Almgren-Chriss, but the coefficient bundles
+  volatility and a calibration constant rather than being estimated from a fitted
+  execution model, and impact/capacity are computed at a *fixed nominal* AUM (the
+  "at \$X AUM" view) rather than the compounding book value — so the reference
+  describes a fuller cost model than the code calibrates.
+- The Sortino ratio indexes target semideviation; the code normalises downside
+  squared deviations by the full sample size `N` (so downside deviation never
+  exceeds total volatility) rather than by the count of downside observations, a
+  common but not universal convention.
 
 The canonical references are listed regardless, since they are what you would
 read to understand what the code is approximating.

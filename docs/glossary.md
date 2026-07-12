@@ -445,3 +445,137 @@ A pass-or-fail log of every configuration evaluated in the pre-registered grid
 (`data/graphs/trials.parquet`). The deflated Sharpe and Bonferroni/BH steps are fed
 the total number of trials run, not the number of reported winners — the single
 most important guard against fooling yourself in Phase 3.
+
+### Execution lag (T+1)
+
+The gap between when a signal is known and when it is traded. A signal computed
+from close(*t*) is filled at close(*t + exec_lag*); `exec_lag = 1` (T+1) is the
+honest default, and `exec_lag = 0` trades at the same close the signal was
+computed from — a look-ahead cheat kept only as a test that the timing bites.
+
+### Weight drift / buy-and-hold
+
+Between rebalances the book is held, not re-traded, so its weights drift as the
+underlying prices move. The backtester models this drift (rather than snapping
+back to target weights daily), so turnover is charged only at rebalances and the
+held book is realistic.
+
+### NAV-relative return
+
+The daily portfolio return measured against the *current* book value, not the
+capital deployed at the last rebalance. Under buy-and-hold drift the weights are
+renormalised by the portfolio's own growth each day, so the compounded equity
+equals an exact buy-and-hold NAV; the naive version double-counts within-period
+growth.
+
+### Turnover
+
+The two-sided sum of absolute weight changes at a rebalance, `sum_i |w_i - w_i^-|`,
+where `w^-` is the drifted pre-rebalance weight. Counting both legs charges the
+sells and the buys; linear transaction cost is this times the assumed spread.
+
+### Market impact / square-root law
+
+The price concession from trading size. Modelled per name as
+`coef * sqrt(trade notional / ADV)` of the traded notional (Almgren-Chriss), so
+the per-unit cost grows with size and the *total* impact drag is convex
+(`~ size^{3/2}`) — unlike a flat linear fee, it dominates at scale.
+
+### ADV (average daily volume)
+
+Trailing average dollar volume (close x volume), here over 21 days. Sets the
+participation rate (trade / ADV) that drives market impact and anchors the
+capacity report.
+
+### Capacity
+
+How much the strategy can hold before it moves the market. Reported, not
+optimised: each position is expressed as a fraction of its 21-day ADV, worst
+offenders first, so the size at which the book becomes untradeable is explicit.
+
+### Short-borrow cost
+
+The daily carry paid to borrow stock for the short leg, accrued on the short gross
+at an annualised borrow rate / 252. A long-only book pays none; a dollar-neutral
+book pays it on half its gross.
+
+### Hard-to-borrow (HTB)
+
+Stock that is costly or impossible to short. Proxied here by names that are both
+small-cap and illiquid, and excluded from the short book (their short weights
+zeroed, longs untouched) — a defence against "free-money" shorts that can't be
+put on in practice.
+
+### Walk-forward / in-sample vs out-of-sample
+
+Splitting the timeline so parameters are chosen on in-sample (IS) data and judged
+on strictly later out-of-sample (OOS) data that never informed them. The report's
+headline is the OOS figure; IS and OOS masks are disjoint by construction.
+
+### Holding period
+
+The gap between rebalances (in trading days), equivalently the rebalance
+frequency. The engine runs at several holding periods (1 / 5 / 21 days) as a
+sensitivity sweep.
+
+### Position sizing (equal / signal / risk)
+
+How the selected names are weighted: equal-weight within each leg, proportional to
+signal strength, or inverse-volatility (risk-parity-lite, so a lower-vol name
+carries a larger position). All produce a dollar-neutral, unit-gross book before
+constraints.
+
+### Position cap
+
+A hard limit on any single-name weight, `|w_i| <= max_weight`. The first capacity
+lever, applied by clipping.
+
+### Dollar-neutral / sector-neutral / beta-neutral
+
+Constraints on net exposure: dollar-neutral zeroes the net weight (`sum w = 0`),
+sector-neutral bounds each sector's net within a cap, beta-neutral projects out net
+market beta (`sum w_i beta_i = 0`). In Phase 4 these are a deterministic
+single-pass projection; the exact joint version is Phase 5.
+
+### Weigher
+
+The pluggable "size then constrain" step the backtest engine calls each rebalance
+to turn a signal cross-section into target weights. The default reproduces the base
+schemes; a composed weigher applies sizing plus the constraint pipeline.
+
+### Sortino ratio
+
+A Sharpe variant that penalises only downside risk: excess return over the *target
+semideviation* (root-mean-square of returns below a target, normalised by the full
+sample), so it never exceeds the Sharpe for the same series.
+
+### Maximum drawdown / Calmar
+
+Max drawdown is the worst peak-to-trough decline of the equity curve (a positive
+magnitude); Calmar is CAGR divided by that magnitude — return per unit of
+worst-case pain.
+
+### Conditional drawdown (CDaR)
+
+The expected shortfall of the drawdown distribution: the mean of the worst tail of
+drawdowns (here the worst 5%), a smoother tail-risk measure than the single-point
+maximum.
+
+### Profit factor
+
+Gross profit divided by gross loss — the sum of positive returns over the absolute
+sum of negative returns. Above 1 means the winners outweigh the losers.
+
+### Sharpe-vs-cost curve
+
+Net Sharpe as a function of the assumed round-trip trading cost (0-25 bps). The
+headline robustness chart: a Sharpe that collapses between 5 and 10 bps is
+borderline, one that degrades gently is real. Built over the same period and cost
+model as the report headline, so the curve at the assumed cost equals it.
+
+### Pitfalls-as-tests
+
+The roadmap's canonical backtesting mistakes (trading on the close, linear costs
+everywhere, free shorts, whole-sample optimisation, intraday stop-look-ahead,
+ignored capacity) encoded one-assertion-each as an integration suite, so every
+defence is a permanent regression guard rather than a claim in prose.

@@ -8,18 +8,29 @@ can tune on IS folds and report OOS; the 4.1 engine itself fits nothing.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from qer.graphs.windows import rebalance_dates
 
 
-def rebalance_schedule(calendar, freq: str = "M", start=None, end=None) -> pd.DatetimeIndex:
-    """Rebalance dates: the last trading day of each ``freq`` period on ``calendar``.
+def rebalance_schedule(calendar, freq="M", start=None, end=None) -> pd.DatetimeIndex:
+    """Rebalance dates on ``calendar``.
 
     ``freq`` is a pandas period alias -- ``"W"`` weekly, ``"M"`` monthly, ``"Q"``
-    quarterly. Reuses ``graphs.windows.rebalance_dates`` so every rebalance is a
+    quarterly (reuses ``graphs.windows.rebalance_dates``) -- or an ``int`` meaning
+    "every N trading days" (used by the holding-period sweep). Every rebalance is a
     real trading day.
     """
+    if isinstance(freq, (int, np.integer)):
+        if int(freq) < 1:
+            raise ValueError("integer freq (every-N-days) must be >= 1")
+        cal = pd.DatetimeIndex(calendar).drop_duplicates().sort_values()
+        if start is not None:
+            cal = cal[cal >= pd.Timestamp(start)]
+        if end is not None:
+            cal = cal[cal <= pd.Timestamp(end)]
+        return cal[:: int(freq)]
     return rebalance_dates(calendar, freq=freq, start=start, end=end)
 
 
